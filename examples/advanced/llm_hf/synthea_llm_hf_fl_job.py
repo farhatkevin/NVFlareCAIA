@@ -27,7 +27,7 @@ from nvflare.private.fed.utils.fed_utils import split_gpus
 
 def main():
     args = define_parser()
-    train_script = "src/hf_sft_peft_fl.py"
+    train_script = "src/synthea_hf_sft_peft_fl.py"
     client_ids = args.client_ids
     num_clients = len(client_ids)
     # get the GPU assignments and ports

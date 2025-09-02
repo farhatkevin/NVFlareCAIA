@@ -16,7 +16,7 @@ import argparse
 
 # Add deterministic seed for reproducibility illustration
 import random
-
+import os
 import datasets
 import numpy as np
 import torch
@@ -74,8 +74,20 @@ def main():
     args = parser.parse_args()
 
     # Dataset
-    dataset_train = datasets.load_dataset("json", data_files=args.data_path_train, split="train")
-    dataset_valid = datasets.load_dataset("json", data_files=args.data_path_valid, split="train")
+    dataset_train = datasets.load_dataset(
+        "json",
+        data_files=args.data_path_train,
+        split="train",
+        cache_dir=os.environ.get("HF_DATASETS_CACHE", "./.cache"),
+    )
+
+    dataset_valid = datasets.load_dataset(
+        "json",
+        data_files=args.data_path_valid,
+        split="train",
+        cache_dir=os.environ.get("HF_DATASETS_CACHE", "./.cache"),
+    )
+
     # Print dataset info
     print(f"Dataset size: training {len(dataset_train)}, validation {len(dataset_valid)}")
     # record every 5% of the dataset

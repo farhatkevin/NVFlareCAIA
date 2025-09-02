@@ -46,8 +46,9 @@ np.random.seed(0)
 
 def format_instruction(example):
     output_texts = []
-    for i in range(len(example["input"])):
-        text = f"### Instruction: Generate Output according to the information and question given by Input. ### Input:{example['input'][i]} ### Response: {example['output'][i]}"
+    # Format for synthea medical data with prompt/completion structure
+    for i in range(len(example["prompt"])):
+        text = f"### Instruction: You are a medical AI assistant. Analyze the patient data and provide the correct diagnosis. ### Input: {example['prompt'][i]} ### Response: {example['completion'][i]}"
         output_texts.append(text)
     return output_texts
 
@@ -85,17 +86,17 @@ def main():
     parser.add_argument(
         "--data_path_train",
         type=str,
-        default="./dataset/dolly/training.jsonl",
+        default="./synthea_data/train.jsonl",
     )
     parser.add_argument(
         "--data_path_valid",
         type=str,
-        default="./dataset/dolly/validation.jsonl",
+        default="./synthea_data/test.jsonl",
     )
     parser.add_argument(
         "--output_path",
         type=str,
-        default="./workspace_federated/llama-3.2-1b-dolly-sft",
+        default="./workspace_federated/llama-3.2-1b-synthea-sft",
     )
     parser.add_argument(
         "--train_mode",

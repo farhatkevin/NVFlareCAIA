@@ -148,7 +148,7 @@ def main():
         lr_scheduler_type=args.lr_scheduler,
         lr_scheduler_kwargs={"num_cycles": 2},
         disable_tqdm=True,
-        max_seq_length=1024,
+        # max_seq_length=1024,
         save_total_limit=2,
         # safetensors will remove shared layers, e.g. lm_head.weight
         # disable for local checkpointing
