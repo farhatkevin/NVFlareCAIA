@@ -15,6 +15,7 @@
 import argparse
 import copy
 import os
+from functools import partial
 
 # Add deterministic seed for reproducibility illustration
 import random
@@ -26,12 +27,13 @@ import torch
 import torch.distributed as dist
 from accelerate import PartialState
 from peft import LoraConfig, get_peft_model, get_peft_model_state_dict, set_peft_model_state_dict, utils
-from transformers import AutoModelForCausalLM, TrainerCallback, trainer_utils
+from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback, trainer_utils
 from trl import SFTConfig, SFTTrainer
 
 import nvflare.client as flare
+from training_utils import compute_metrics, filter_by_length
 
-
+MAX_SEQ_LENGTH = 2048
 # Add callback to stop at each epoch
 class StopCallback(TrainerCallback):
     def on_epoch_end(self, args, state, control, logs=None, **kwargs):
@@ -48,9 +50,10 @@ def format_instruction(example):
     output_texts = []
     # Format for synthea medical data with prompt/completion structure
     for i in range(len(example["prompt"])):
-        text = f"### Instruction: You are a medical AI assistant. Analyze the patient data and provide the correct diagnosis. ### Input: {example['prompt'][i]} ### Response: {example['completion'][i]}"
+        text = f"### Input: {example['prompt'][i]} ### Response: {example['completion'][i]}"
         output_texts.append(text)
     return output_texts
+    # return example
 
 
 def setup_distributed_training():
@@ -140,8 +143,10 @@ def main():
         dist.barrier()
 
     # Dataset
-    dataset_train = datasets.load_dataset("json", data_files=args.data_path_train, split="train")
-    dataset_valid = datasets.load_dataset("json", data_files=args.data_path_valid, split="train")
+    #TODO: remove select after testing
+    dataset_train = datasets.load_dataset("json", data_files=args.data_path_train, split="train").shuffle(seed=42).select(range(100))
+    dataset_valid = datasets.load_dataset("json", data_files=args.data_path_valid, split="train").shuffle(seed=42).select(range(5))
+    
     # Print dataset info
     if local_rank == 0:
         print(f"Dataset size: training {len(dataset_train)}, validation {len(dataset_valid)}")
@@ -155,6 +160,23 @@ def main():
     # Model configs
     model_name_or_path = args.model_name_or_path
     peft_config = None
+
+    # Load tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    
+    # Apply filtering to remove examples that are too long
+    original_train_size = len(dataset_train)
+    original_valid_size = len(dataset_valid)
+    dataset_train = dataset_train.filter(lambda x: filter_by_length(x, tokenizer, format_instruction, MAX_SEQ_LENGTH))
+    dataset_valid = dataset_valid.filter(lambda x: filter_by_length(x, tokenizer, format_instruction, MAX_SEQ_LENGTH))
+    
+    if local_rank == 0:
+        print(f"Filtered dataset by length (max {MAX_SEQ_LENGTH-1} tokens):")
+        print(f"  Training: {original_train_size} -> {len(dataset_train)} examples")
+        print(f"  Validation: {original_valid_size} -> {len(dataset_valid)} examples")
+    
 
     # Load model with device_map
     default_dtype = torch.get_default_dtype()
@@ -201,7 +223,7 @@ def main():
         # optimizers using bitsandbytes like "paged_adamw_32bit" have an issue with
         # multi-gpu training, to be consistent, use regular optimizer
         optim="adamw_torch",
-        logging_steps=logging_steps,
+        logging_steps=1,
         save_strategy="epoch",
         learning_rate=5e-4,
         bf16=True,
@@ -214,12 +236,19 @@ def main():
         save_total_limit=2,
         # safetensors will remove shared layers, e.g. lm_head.weight
         # disable for local checkpointing
+        eval_strategy="steps",
+        eval_on_start=True,
+        eval_steps=1,
         save_safetensors=False,
         seed=0,
         data_seed=0,
         # Multi-GPU specific settings
         ddp_find_unused_parameters=False,
         dataloader_pin_memory=False,
+
+        # Prompt Completion w/ Mitchell
+        completion_only_loss=False,
+        # metric_for_best_model="eval_accuracy",
     )
 
     # Trainer
@@ -228,7 +257,10 @@ def main():
         train_dataset=dataset_train,
         eval_dataset=dataset_valid,
         peft_config=peft_config,
-        formatting_func=format_instruction,
+        # max_seq_length=MAX_SEQ_LENGTH,
+        # formatting_func=format_instruction,
+        processing_class=tokenizer,
+        compute_metrics=partial(compute_metrics, tokenizer=tokenizer, verbose=True),
         args=train_args,
         # Add a callback to stop training after one epoch
         callbacks=[StopCallback()],
@@ -275,8 +307,11 @@ def main():
             dist.barrier()
 
         # Evaluate the global model
-        eval_loss = trainer.evaluate()
-        eval_loss = float(eval_loss["eval_loss"])
+        eval_results = trainer.evaluate()
+        eval_loss = float(eval_results["eval_loss"])
+        eval_accuracy = eval_results.get("eval_accuracy", 0.0)
+        if local_rank == 0:
+            print(f"Evaluation - Loss: {eval_loss:.4f}, Accuracy: {eval_accuracy:.4f}")
 
         # Train
         if curr_round == 0:
@@ -343,7 +378,7 @@ def main():
             # construct trained FL model
             output_model = flare.FLModel(
                 params=out_param,
-                metrics={"eval_loss": eval_loss},
+                metrics={"eval_loss": eval_loss, "eval_accuracy": eval_accuracy},
                 meta={"NUM_STEPS_CURRENT_ROUND": trainer.train_dataset.num_rows},
             )
             # send model back to NVFlare
