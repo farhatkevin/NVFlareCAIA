@@ -31,9 +31,9 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback, t
 from trl import SFTConfig, SFTTrainer
 
 import nvflare.client as flare
-from training_utils import compute_metrics, filter_by_length
+from training_utils import compute_metrics, filter_by_length, DebuggingCallback, debug_data_collation, test_generation
 
-MAX_SEQ_LENGTH = 2048
+MAX_SEQ_LENGTH = 4096
 # Add callback to stop at each epoch
 class StopCallback(TrainerCallback):
     def on_epoch_end(self, args, state, control, logs=None, **kwargs):
@@ -47,13 +47,25 @@ np.random.seed(0)
 
 
 def format_instruction(example):
-    output_texts = []
-    # Format for synthea medical data with prompt/completion structure
-    for i in range(len(example["prompt"])):
-        text = f"### Input: {example['prompt'][i]} ### Response: {example['completion'][i]}"
-        output_texts.append(text)
-    return output_texts
-    # return example
+    # output_texts = []
+    # # Format for synthea medical data with prompt/completion structure
+    # for i in range(len(example["prompt"])):
+    #     text = f"### Input: {example['prompt'][i]} ### Response: {example['completion'][i]}"
+    #     output_texts.append(text)
+    # return output_texts
+    
+    if isinstance(example["prompt"], list):
+        # Batch processing - return as separate prompt/completion lists
+        return {
+            "prompt": example["prompt"],
+            "completion": example["completion"]
+        }
+    else:
+        # Single example - return as separate prompt/completion
+        return {
+            "prompt": [example["prompt"]],
+            "completion": [example["completion"]]
+        }
 
 
 def setup_distributed_training():
@@ -150,6 +162,16 @@ def main():
     # Print dataset info
     if local_rank == 0:
         print(f"Dataset size: training {len(dataset_train)}, validation {len(dataset_valid)}")
+        
+        # Debug: Check dataset samples
+        print("=== DATASET DEBUG ===")
+        for i in range(min(3, len(dataset_train))):
+            sample = dataset_train[i]
+            print(f"Sample {i+1}:")
+            print(f"  Prompt length: {len(sample['prompt'])} chars")
+            print(f"  Completion: '{sample['completion']}'")
+            print(f"  Completion length: {len(sample['completion'])} chars")
+            print()
     # record every 5% of the dataset
     batch_size = 4
     gra_accu_steps = 10
@@ -247,8 +269,9 @@ def main():
         dataloader_pin_memory=False,
 
         # Prompt Completion w/ Mitchell
-        completion_only_loss=False,
-        # metric_for_best_model="eval_accuracy",
+        completion_only_loss=True,
+        metric_for_best_model="eval_accuracy",
+        max_length=MAX_SEQ_LENGTH,
     )
 
     # Trainer
@@ -265,6 +288,26 @@ def main():
         # Add a callback to stop training after one epoch
         callbacks=[StopCallback()],
     )
+
+    # ============================================================================
+    # DEBUGGING: Check data collation and model I/O
+    # ============================================================================
+    print("DEBUG: Analyzing trainer data collation...")
+    debug_data_collation(trainer, tokenizer, num_samples=2)
+    
+    # Add debugging callback to monitor training
+    trainer.add_callback(DebuggingCallback())
+    
+    # Test generation before training
+    sample_prompt = dataset_train[0]["prompt"][:200] + "..."
+    print(f"\nDEBUG: Generation before training:")
+    print(f"Prompt: {sample_prompt}")
+    try:
+        initial_generation = test_generation(model, tokenizer, sample_prompt, max_length=30)
+        print(f"Generated: {initial_generation}")
+    except Exception as e:
+        print(f"Generation failed: {e}")
+    print("=" * 80)
 
     # initializes NVFlare client API
     flare.init()
