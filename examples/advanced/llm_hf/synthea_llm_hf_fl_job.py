@@ -21,7 +21,7 @@ from nvflare.app_common.workflows.fedavg import FedAvg
 from nvflare.app_opt.pt.file_model_persistor import PTFileModelPersistor
 from nvflare.app_opt.pt.quantization.dequantizer import ModelDequantizer
 from nvflare.app_opt.pt.quantization.quantizer import ModelQuantizer
-from nvflare.job_config.script_runner import ScriptRunner
+from nvflare.job_config.script_runner import ScriptRunner, BaseScriptRunner
 from nvflare.private.fed.utils.fed_utils import split_gpus
 
 
@@ -110,20 +110,38 @@ def main():
         else:
             raise ValueError(f"Invalid message_mode: {message_mode}, only numpy and tensor are supported.")
 
+        
+        # To customize timeouts, use BaseScriptRunner with a pre-configured executor. ScriptRunner does not accept an exector, but BaseScriptRunner does.
+        # Note: BaseScriptRunner uses fixed component ids "pipe" and "launcher", which we match here.
+        # This changes the timeouts properly, which we may need to modify depending on batch sizes, model size, etc. 
+        from nvflare.app_opt.pt.client_api_launcher_executor import PTClientAPILauncherExecutor
+
+        executor = PTClientAPILauncherExecutor(
+            pipe_id="pipe",
+            launcher_id="launcher",
+            peer_read_timeout=600,
+            task_wait_timeout=None,            
+            launch_timeout=None,               
+            heartbeat_timeout=300.0,           
+            last_result_transfer_timeout=900.0
+        )
+
         if len(gpus[i]) == 1:
-            runner = ScriptRunner(
+            runner = BaseScriptRunner(
                 script=train_script,
                 script_args=script_args,
                 server_expected_format=server_expected_format,
                 launch_external_process=True,
+                executor=executor,
             )
         else:
-            runner = ScriptRunner(
+            runner = BaseScriptRunner(
                 script=train_script,
                 script_args=script_args,
                 server_expected_format=server_expected_format,
                 launch_external_process=True,
                 command=f"python3 -m torch.distributed.run --nnodes=1 --nproc_per_node={len(gpus[i])} --master_port={ports[i]}",
+                executor=executor,
             )
         job.to(runner, site_name, tasks=["train"])
 
