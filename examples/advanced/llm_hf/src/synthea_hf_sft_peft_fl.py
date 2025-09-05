@@ -31,7 +31,13 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback, t
 from trl import SFTConfig, SFTTrainer
 
 import nvflare.client as flare
-from training_utils import compute_metrics, filter_by_length, DebuggingCallback, debug_data_collation, test_generation
+from training_utils import (
+    compute_metrics,
+    preprocess_logits_for_metrics,
+    filter_by_length,
+    test_generation_with_pipeline,
+    test_generation_with_generate,
+)
 
 MAX_SEQ_LENGTH = 4096
 # Add callback to stop at each epoch
@@ -47,23 +53,30 @@ np.random.seed(0)
 
 
 def format_instruction(example):
-    # output_texts = []
-    # # Format for synthea medical data with prompt/completion structure
-    # for i in range(len(example["prompt"])):
-    #     text = f"### Input: {example['prompt'][i]} ### Response: {example['completion'][i]}"
-    #     output_texts.append(text)
-    # return output_texts
+    # Format using chat template with system prompt
+    system_prompt = "You are a medical AI expert."
     
     if isinstance(example["prompt"], list):
-        # Batch processing - return as separate prompt/completion lists
+        # Batch processing
+        formatted_prompts = []
+        for i, prompt in enumerate(example["prompt"]):
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt}
+            ]
+            formatted_prompts.append(messages)
         return {
-            "prompt": example["prompt"],
+            "prompt": formatted_prompts,
             "completion": example["completion"]
         }
     else:
-        # Single example - return as separate prompt/completion
+        # Single example
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": example["prompt"]}
+        ]
         return {
-            "prompt": [example["prompt"]],
+            "prompt": [messages],
             "completion": [example["completion"]]
         }
 
@@ -96,7 +109,7 @@ def main():
     parser.add_argument(
         "--model_name_or_path",
         type=str,
-        default="meta-llama/llama-3.2-1b",
+        default="meta-llama/llama-3.1-8B-Instruct",
     )
     parser.add_argument(
         "--data_path_train",
@@ -111,7 +124,7 @@ def main():
     parser.add_argument(
         "--output_path",
         type=str,
-        default="./workspace_federated/llama-3.2-1b-synthea-sft",
+        default="./workspace_federated/llama-3.1-8B-Instruct-synthea-sft",
     )
     parser.add_argument(
         "--train_mode",
@@ -156,22 +169,13 @@ def main():
 
     # Dataset
     #TODO: remove select after testing
-    dataset_train = datasets.load_dataset("json", data_files=args.data_path_train, split="train").shuffle(seed=42).select(range(100))
-    dataset_valid = datasets.load_dataset("json", data_files=args.data_path_valid, split="train").shuffle(seed=42).select(range(5))
+    dataset_train = datasets.load_dataset("json", data_files=args.data_path_train, split="train").shuffle(seed=35).select(range(1000))
+    dataset_valid = datasets.load_dataset("json", data_files=args.data_path_valid, split="train").shuffle(seed=35).select(range(50))
     
     # Print dataset info
     if local_rank == 0:
         print(f"Dataset size: training {len(dataset_train)}, validation {len(dataset_valid)}")
-        
-        # Debug: Check dataset samples
-        print("=== DATASET DEBUG ===")
-        for i in range(min(3, len(dataset_train))):
-            sample = dataset_train[i]
-            print(f"Sample {i+1}:")
-            print(f"  Prompt length: {len(sample['prompt'])} chars")
-            print(f"  Completion: '{sample['completion']}'")
-            print(f"  Completion length: {len(sample['completion'])} chars")
-            print()
+
     # record every 5% of the dataset
     batch_size = 4
     gra_accu_steps = 10
@@ -187,6 +191,13 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    
+    # Set up chat template if not already present
+    if not hasattr(tokenizer, 'chat_template') or tokenizer.chat_template is None:
+        # Default chat template for llama-style models
+        tokenizer.chat_template = "{% for message in messages %}{% if message['role'] == 'system' %}{{ '<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n' + message['content'] + '<|eot_id|>' }}{% elif message['role'] == 'user' %}{{ '<|start_header_id|>user<|end_header_id|>\n\n' + message['content'] + '<|eot_id|>' }}{% elif message['role'] == 'assistant' %}{{ '<|start_header_id|>assistant<|end_header_id|>\n\n' + message['content'] + '<|eot_id|>' }}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<|start_header_id|>assistant<|end_header_id|>\n\n' }}{% endif %}"
+
+    # (No response_template used in original config)
     
     # Apply filtering to remove examples that are too long
     original_train_size = len(dataset_train)
@@ -245,7 +256,7 @@ def main():
         # optimizers using bitsandbytes like "paged_adamw_32bit" have an issue with
         # multi-gpu training, to be consistent, use regular optimizer
         optim="adamw_torch",
-        logging_steps=1,
+        logging_steps=20,
         save_strategy="epoch",
         learning_rate=5e-4,
         bf16=True,
@@ -260,7 +271,7 @@ def main():
         # disable for local checkpointing
         eval_strategy="steps",
         eval_on_start=True,
-        eval_steps=1,
+        eval_steps=50,
         save_safetensors=False,
         seed=0,
         data_seed=0,
@@ -274,40 +285,19 @@ def main():
         max_length=MAX_SEQ_LENGTH,
     )
 
-    # Trainer
     trainer = SFTTrainer(
         model=model,
         train_dataset=dataset_train,
         eval_dataset=dataset_valid,
         peft_config=peft_config,
         # max_seq_length=MAX_SEQ_LENGTH,
-        # formatting_func=format_instruction,
         processing_class=tokenizer,
         compute_metrics=partial(compute_metrics, tokenizer=tokenizer, verbose=True),
+        preprocess_logits_for_metrics=lambda logits, labels: preprocess_logits_for_metrics(logits, labels, tokenizer),
         args=train_args,
         # Add a callback to stop training after one epoch
         callbacks=[StopCallback()],
     )
-
-    # ============================================================================
-    # DEBUGGING: Check data collation and model I/O
-    # ============================================================================
-    print("DEBUG: Analyzing trainer data collation...")
-    debug_data_collation(trainer, tokenizer, num_samples=2)
-    
-    # Add debugging callback to monitor training
-    trainer.add_callback(DebuggingCallback())
-    
-    # Test generation before training
-    sample_prompt = dataset_train[0]["prompt"][:200] + "..."
-    print(f"\nDEBUG: Generation before training:")
-    print(f"Prompt: {sample_prompt}")
-    try:
-        initial_generation = test_generation(model, tokenizer, sample_prompt, max_length=30)
-        print(f"Generated: {initial_generation}")
-    except Exception as e:
-        print(f"Generation failed: {e}")
-    print("=" * 80)
 
     # initializes NVFlare client API
     flare.init()
@@ -349,7 +339,11 @@ def main():
         if dist.is_initialized():
             dist.barrier()
 
-        # Evaluate the global model
+        # Evaluate the global model (reset debug so first eval batch prints A–E logits)
+        try:
+            preprocess_logits_for_metrics.debug_count = 0
+        except Exception:
+            pass
         eval_results = trainer.evaluate()
         eval_loss = float(eval_results["eval_loss"])
         eval_accuracy = eval_results.get("eval_accuracy", 0.0)

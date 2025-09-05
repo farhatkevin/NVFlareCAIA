@@ -93,7 +93,7 @@ def main():
     job.to(PTFileModelPersistor(model=model_args, allow_numpy_conversion=False), "server", id="persistor")
 
     # Add model selection widget and send to server
-    job.to(IntimeModelSelector(key_metric="eval_loss", negate_key_metric=True), "server", id="model_selector")
+    job.to(IntimeModelSelector(key_metric="eval_accuracy", negate_key_metric=False), "server", id="model_selector")
 
     # Send ScriptRunner to all clients
     for i in range(num_clients):
@@ -119,7 +119,7 @@ def main():
         executor = PTClientAPILauncherExecutor(
             pipe_id="pipe",
             launcher_id="launcher",
-            peer_read_timeout=600,
+            peer_read_timeout=300.0,
             task_wait_timeout=None,            
             launch_timeout=None,               
             heartbeat_timeout=300.0,           
