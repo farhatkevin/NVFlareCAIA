@@ -9,4 +9,5 @@ python3 synthea_llm_hf_fl_job.py \
  --threads 1 \
  --gpu "[0],[1]" \
  --quantize_mode float16 \
- --num_rounds 2
+ --num_rounds 2 \
+ --model_name_or_path meta-llama/Llama-3.2-1B-Instruct\

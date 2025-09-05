@@ -15,13 +15,11 @@ def get_answer_token_ids(tokenizer, choices=("A","B","C","D","E")) -> List[int]:
 
 def preprocess_logits_for_metrics(logits, labels, tokenizer=None):
     """
-    For each sample, select the logits at the FIRST non-masked target position
-    (i.e., first index where labels != -100), then restrict predictions to A..E.
-
-    - Aligns eval prediction position with compute_metrics' use of the first
-      non-ignored label.
-    - If a row has no valid label positions, we fall back to the last timestep.
-    - Uses get_answer_token_ids(tokenizer) as-is (no space/newline variants).
+    For each sample, find the answer token that appears after the assistant header.
+    
+    - Looks for the pattern: <|start_header_id|>assistant<|end_header_id|>
+    - Then finds the first answer token (A, B, C, D, or E) after this pattern
+    - Selects the logits that predict this answer token
     """
     if isinstance(logits, tuple):
         logits = logits[0]  # [B, S, V]
@@ -34,19 +32,78 @@ def preprocess_logits_for_metrics(logits, labels, tokenizer=None):
         else:
             labels_t = labels.to(logits.device)
 
-        # First non-ignored position per row (where answer token is)
-        mask = (labels_t != -100)                      # [B, S] bool
-        has_any = mask.any(dim=1)                      # [B]
-        first_pos = mask.float().argmax(dim=1)         # [B] position of answer token
+        # Get token IDs for the assistant header pattern
+        if tokenizer is not None:
+            # Encode the assistant header tokens
+            start_header_id = tokenizer.encode("<|start_header_id|>", add_special_tokens=False)[0]
+            assistant_id = tokenizer.encode("assistant", add_special_tokens=False)[0]
+            end_header_id = tokenizer.encode("<|end_header_id|>", add_special_tokens=False)[0]
+            answer_token_ids = get_answer_token_ids(tokenizer)
+        else:
+            # Fallback values for common tokenizers
+            start_header_id = 128006  # Common for Llama models
+            assistant_id = 78191      # Common for "assistant"
+            end_header_id = 128007    # Common for Llama models
+            answer_token_ids = [32, 33, 34, 35, 36]  # A, B, C, D, E
         
-        # logits[t-1] predicts labels[t], so use first_pos-1
-        pred_pos = torch.clamp(first_pos - 1 , min=0)   # [B] position that predicts the answer
+        # Find the answer position for each sample
+        answer_positions = []
+        for b in range(B):
+            sample_labels = labels_t[b]
+            found_answer_pos = -1
+
+            # Prefer the LAST non-ignored A–E token in the sequence (assistant reply is at the end)
+            for j in range(S - 1, -1, -1):
+                tok = int(sample_labels[j].item())
+                if tok != -100 and tok in answer_token_ids:
+                    found_answer_pos = j
+                    break
+
+            # Fallback: try to find after assistant header if present (labels may mask headers)
+            if found_answer_pos == -1:
+                for i in range(S - 4):
+                    if (
+                        sample_labels[i] == start_header_id
+                        and i + 1 < S
+                        and sample_labels[i + 1] == assistant_id
+                        and i + 2 < S
+                        and sample_labels[i + 2] == end_header_id
+                    ):
+                        for j in range(i + 3, S):
+                            tok = int(sample_labels[j].item())
+                            if tok != -100 and tok in answer_token_ids:
+                                found_answer_pos = j
+                                break
+                        if found_answer_pos != -1:
+                            break
+
+            # Final fallback: use last non-masked position
+            if found_answer_pos == -1:
+                mask = (sample_labels != -100)
+                if mask.any():
+                    # Find the last non-masked position
+                    non_masked_positions = torch.where(mask)[0]
+                    found_answer_pos = non_masked_positions[-1].item()
+                else:
+                    found_answer_pos = S - 1
+            
+            answer_positions.append(found_answer_pos)
         
-        # Fallback to last position for rows with no valid labels
-        pos = torch.where(has_any, pred_pos, torch.full_like(pred_pos, S - 1))
+        # Convert to tensor
+        answer_pos = torch.tensor(answer_positions, device=logits.device)
+        print("answer positions: ", answer_pos)
+        
+        print("token at this position:", tokenizer.decode([labels_t[0, answer_pos[0]]]) if tokenizer is not None else labels_t[0, answer_pos[0]].item())
+        # logits[t-1] predicts labels[t], so use answer_pos-1
+        pred_pos = torch.clamp(answer_pos - 1, min=0)
+        
+        # Select the logits at the prediction positions
+        pos = pred_pos
 
         row = torch.arange(B, device=logits.device)
         selected_logits = logits[row, pos, :]          # [B, V] - logits that predict answer
+
+        print("selected logits: " , selected_logits)
 
         debug_count = getattr(preprocess_logits_for_metrics, 'debug_count', 0) + 1
         preprocess_logits_for_metrics.debug_count = debug_count
@@ -56,22 +113,30 @@ def preprocess_logits_for_metrics(logits, labels, tokenizer=None):
             print(f"=== POSITION DEBUG (call #{debug_count}) ===")
             sample_0_labels = labels_t[0].cpu().numpy()
             print(f"Sample 0 label structure around answer:")
-            answer_pos = first_pos[0].item()
+            answer_pos_val = answer_pos[0].item()
             pred_position = pos[0].item()
             
-            # Show 5 positions around the answer
-            start_pos = max(0, answer_pos - 3)
-            end_pos = min(len(sample_0_labels), answer_pos + 3)
-            # start_pos = 0
-            # end_pos = len(sample_0_labels)
-            print("end_pos:", end_pos)
-            for i in range(start_pos, end_pos):
-                label_val = sample_0_labels[i]
-                token_str = tokenizer.decode([label_val]) if label_val != -100 else "IGNORED"
-                marker = " <-- ANSWER" if i == answer_pos else " <-- PRED" if i == pred_position else ""
-                print(f"  pos {i}: label={label_val} ({token_str}){marker}")
+            print(f"Looking for assistant header tokens: {start_header_id}, {assistant_id}, {end_header_id}")
+            print(f"Answer token IDs: {answer_token_ids}")
             
-            print(f"Using prediction position: {pred_position} (answer_pos: {answer_pos})")
+            # Show the actual answer token found
+            if answer_pos_val < len(sample_0_labels):
+                actual_answer_token = sample_0_labels[answer_pos_val]
+                if actual_answer_token in answer_token_ids:
+                    answer_letter = tokenizer.decode([actual_answer_token])
+                    print(f"Found answer token at pos {answer_pos_val}: {actual_answer_token} ({answer_letter})")
+                else:
+                    token_str = tokenizer.decode([actual_answer_token]) if actual_answer_token != -100 else "MASKED"
+                    print(f"WARNING: Position {answer_pos_val} has token {actual_answer_token} ({token_str}), not an answer token!")
+            
+            # Show full attention mask (labels != -100) and a small window around the answer
+            mask_vec = (sample_0_labels != -100).astype(int)
+            wide_start = max(0, answer_pos_val - 10)
+            wide_end = min(len(sample_0_labels), answer_pos_val + 10)
+            print(f"\nFull attention mask (1=labelled, 0=ignored): {mask_vec.tolist()}")
+            print(f"Mask around answer (pos {wide_start}..{wide_end}): {mask_vec[wide_start:wide_end].tolist()}")
+            
+            print(f"Using prediction position: {pred_position} (answer_pos: {answer_pos_val})")
             print("=" * 30)
 
         if tokenizer is not None:
@@ -91,10 +156,11 @@ def preprocess_logits_for_metrics(logits, labels, tokenizer=None):
                 print("Choice logits at prediction position (A–E):")
                 for i in range(B):
                     pos_i = int(pos[i].item())
+                    answer_pos_i = int(answer_pos[i].item())
                     # True answer if available
                     true_ans = None
-                    if bool(has_any[i].item()):
-                        true_token = int(labels_t[i, first_pos[i]].item())
+                    if answer_pos_i < S:
+                        true_token = int(labels_t[i, answer_pos_i].item())
                         if true_token in allowed_ids:
                             true_ans = tokenizer.decode([true_token])
                     row_scores = ae_scores[i].tolist()
@@ -121,54 +187,67 @@ def compute_metrics(eval_preds: EvalPrediction, tokenizer, verbose=True) -> Dict
             non_ignored = (sample_labels != -100)
             answer_tokens = sample_labels[non_ignored]
             answer_letters = [tokenizer.decode([t]) for t in answer_tokens if t not in [128001]]  # Exclude end_of_text
-            
             print(f"Sample {i}: {answer_letters} (tokens: {answer_tokens.tolist()})")
+
+            # Full attention mask
+            mask_vec = (sample_labels != -100).astype(int)
+            print(f"Sample {i} full attention mask (1=labelled, 0=ignored): {mask_vec.tolist()}")
+            print()
         
-        # Check ALL samples for answer distribution
-        all_answers = []
+        # Prepare allowed IDs and per-sample true answers (one per sample)
         answer_ids = get_answer_token_ids(tokenizer)
-        
-        for i in range(labels.shape[0]):
-            sample_labels = labels[i]
-            non_ignored = (sample_labels != -100)
-            answer_tokens = sample_labels[non_ignored]
-            # Find A,B,C,D,E tokens (exclude end_of_text)
-            valid_answers = [t for t in answer_tokens if t in answer_ids]
-            if valid_answers:
-                all_answers.extend(valid_answers)
-        
-        # Show distribution
+        if verbose:
+            # Show resolved answer token IDs for sanity
+            try:
+                letters = [tokenizer.decode([tid]) for tid in answer_ids]
+            except Exception:
+                letters = [str(tid) for tid in answer_ids]
+            print(f"Answer token IDs mapping: {dict(zip(letters, answer_ids))}")
+
+        # Extract exactly one true answer per sample (prefer LAST occurrence to avoid A in prompt)
+        labels_np = np.asarray(labels)
+        true_ids = []
+        for i in range(labels_np.shape[0]):
+            row = labels_np[i]
+            # Find the last non-ignored A–E token
+            idxs = np.where(row != -100)[0]
+            t_id = -1
+            for j in reversed(idxs.tolist()):
+                if row[j] in answer_ids:
+                    t_id = int(row[j])
+                    break
+            true_ids.append(t_id)
+
+        # Show distribution over true answers (counts should sum to batch size)
         from collections import Counter
-        answer_counts = Counter(all_answers)
-        print(f"Answer distribution in batch:")
-        for token_id in answer_ids:
-            letter = tokenizer.decode([token_id])
-            count = answer_counts.get(token_id, 0)
-            print(f"  {letter}: {count} samples")
-        
-        # Also show what the model predicted vs true answers
-        print(f"Model predictions vs true answers (first 5 samples):")
+        true_counts = Counter([t for t in true_ids if t != -1])
+        print("Answer distribution in batch:")
+        for tid in answer_ids:
+            letter = tokenizer.decode([tid])
+            print(f"  {letter}: {true_counts.get(tid, 0)} samples")
+
+        # Also show model predictions vs true answers (first 5)
+        print("Model predictions vs true answers (first 5 samples):")
         pred_ids_debug = np.asarray(pred_ids).reshape(-1)
-        for i in range(min(5, len(pred_ids_debug), labels.shape[0])):
-            # Get prediction
-            pred_token = pred_ids_debug[i]
+        n = min(5, len(pred_ids_debug), labels_np.shape[0])
+        for i in range(n):
+            pred_token = int(pred_ids_debug[i])
             pred_letter = tokenizer.decode([pred_token]) if pred_token in answer_ids else f"UNKNOWN({pred_token})"
-            
-            # Get true answer
-            sample_labels = labels[i]
-            non_ignored = (sample_labels != -100)
-            true_tokens = sample_labels[non_ignored]
-            true_answers = [t for t in true_tokens if t in answer_ids]
-            true_letter = tokenizer.decode([true_answers[0]]) if true_answers else "UNKNOWN"
-            
-            match = "✓" if pred_token in true_answers else "✗"
+            true_token = true_ids[i]
+            true_letter = tokenizer.decode([true_token]) if true_token in answer_ids else "UNKNOWN"
+            match = "✓" if (true_token != -1 and pred_token == true_token) else "✗"
             print(f"  Sample {i}: predicted {pred_letter} vs true {true_letter} {match}")
-        
-        # Show distribution of all predictions 
-        pred_counts = Counter(pred_ids_debug[:labels.shape[0]])  # Only count valid predictions
-        print(f"Prediction distribution: A:{pred_counts.get(32,0)} B:{pred_counts.get(33,0)} C:{pred_counts.get(34,0)} D:{pred_counts.get(35,0)} E:{pred_counts.get(36,0)}")
-        print(f"True answer distribution:   A:{answer_counts.get(32,0)} B:{answer_counts.get(33,0)} C:{answer_counts.get(34,0)} D:{answer_counts.get(35,0)} E:{answer_counts.get(36,0)}")
-        
+
+        # Show distribution of predictions over A–E
+        pred_counts = Counter([int(p) for p in pred_ids_debug[:labels_np.shape[0]]])
+        pred_dist = ", ".join(
+            f"{tokenizer.decode([tid])}:{pred_counts.get(tid, 0)}" for tid in answer_ids
+        )
+        true_dist = ", ".join(
+            f"{tokenizer.decode([tid])}:{true_counts.get(tid, 0)}" for tid in answer_ids
+        )
+        print(f"Prediction distribution: {pred_dist}")
+        print(f"True answer distribution:   {true_dist}")
         print("=" * 40)
 
 
@@ -178,43 +257,73 @@ def compute_metrics(eval_preds: EvalPrediction, tokenizer, verbose=True) -> Dict
     if labels.ndim != 2 or labels.shape[0] == 0:
         return {"accuracy": 0.0}
     
-    # Find valid samples (have context before answer)
-    mask = labels != -100
-    has_any = mask.any(axis=1)
-    first_idx = np.where(has_any, mask.argmax(axis=1), 0)
-    valid = has_any & (first_idx > 0)
-    
-    if not valid.any():
+    # Build y_true as the LAST non-ignored A–E token per sample (assistant answer at end)
+    answer_ids = get_answer_token_ids(tokenizer)
+    true_ids = []
+    for i in range(labels.shape[0]):
+        row = labels[i]
+        idxs = np.where(row != -100)[0]
+        t_id = -1
+        for j in reversed(idxs.tolist()):
+            if row[j] in answer_ids:
+                t_id = int(row[j])
+                break
+        true_ids.append(t_id)
+
+    true_ids = np.array(true_ids, dtype=np.int64)
+    valid_idx = np.where(true_ids != -1)[0]
+    if valid_idx.size == 0:
         return {"accuracy": 0.0}
-    
-    # Compare predictions to true labels
-    y_true = labels[valid, first_idx[valid]]
-    y_pred = pred_ids[valid]
-    accuracy = float((y_pred == y_true).mean())
+    y_true = true_ids[valid_idx]
+    y_pred = pred_ids[valid_idx]
+    # Truncate to common length if needed (defensive)
+    m = min(len(y_true), len(y_pred))
+    if m == 0:
+        return {"accuracy": 0.0}
+    accuracy = float((y_pred[:m] == y_true[:m]).mean())
     
     if verbose:
-        print(f"Evaluated {valid.sum()} samples, accuracy: {accuracy:.3f}")
+        print(f"Evaluated {len(valid_idx)} samples, accuracy: {accuracy:.3f}")
     
     return {"accuracy": accuracy}
 
 
-def filter_by_length(example, tokenizer, format_instruction: Callable, max_seq_length: int):
-    """
-    Filter dataset examples that exceed the maximum sequence length.
+# def filter_by_length(example, tokenizer, format_instruction: Callable, max_seq_length: int):
+#     """
+#     Filter dataset examples that exceed the maximum sequence length.
     
-    Args:
-        example: Dataset example with 'prompt' and 'completion' fields
-        tokenizer: The tokenizer used for the model
-        format_instruction: Function to format examples into instruction format
-        max_seq_length: Maximum sequence length in tokens
+#     Args:
+#         example: Dataset example with 'prompt' and 'completion' fields
+#         tokenizer: The tokenizer used for the model
+#         format_instruction: Function to format examples into instruction format
+#         max_seq_length: Maximum sequence length in tokens
         
-    Returns:
-        Boolean indicating whether to keep the example (True if under limit)
-    """
-    # Since format_instruction now returns a dict, manually concatenate for length check
-    full_text = example["prompt"] + "\n\n" + example["completion"]
-    tokens = tokenizer(full_text, truncation=False, return_tensors=None)
-    return len(tokens["input_ids"]) < max_seq_length - 1
+#     Returns:
+#         Boolean indicating whether to keep the example (True if under limit)
+#     """
+#     # Since format_instruction now returns a dict, manually concatenate for length check
+#     full_text = example["prompt"] + "\n\n" + example["completion"]
+#     tokens = tokenizer(full_text, truncation=False, return_tensors=None)
+#     return len(tokens["input_ids"]) < max_seq_length - 1
+
+def filter_by_length_messages(example, tokenizer, max_length):
+    """Filter function for messages format"""
+    try:
+        # Apply chat template to get the full formatted text
+        formatted_text = tokenizer.apply_chat_template(
+            example["messages"], 
+            tokenize=False, 
+            add_generation_prompt=False
+        )
+        tokens = tokenizer.encode(formatted_text)
+        return len(tokens) <= max_length
+    except Exception as e:
+        # Log the error for debugging
+        print(f"Error in filter_by_length_messages: {e}")
+        print(f"Example keys: {example.keys() if hasattr(example, 'keys') else 'Not a dict'}")
+        if "messages" in example:
+            print(f"Messages type: {type(example['messages'])}")
+        return False
 
 def test_generation_with_pipeline(
     model,

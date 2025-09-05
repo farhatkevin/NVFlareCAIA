@@ -34,7 +34,7 @@ import nvflare.client as flare
 from training_utils import (
     compute_metrics,
     preprocess_logits_for_metrics,
-    filter_by_length,
+    filter_by_length_messages,
     test_generation_with_pipeline,
     test_generation_with_generate,
 )
@@ -51,34 +51,29 @@ torch.manual_seed(0)
 random.seed(0)
 np.random.seed(0)
 
-
 def format_instruction(example):
-    # Format using chat template with system prompt
+    """Convert to messages format that TRL expects"""
     system_prompt = "You are a medical AI expert."
     
     if isinstance(example["prompt"], list):
         # Batch processing
-        formatted_prompts = []
+        formatted_messages = []
         for i, prompt in enumerate(example["prompt"]):
             messages = [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt}
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": example["completion"][i]}
             ]
-            formatted_prompts.append(messages)
-        return {
-            "prompt": formatted_prompts,
-            "completion": example["completion"]
-        }
+            formatted_messages.append(messages)
+        return {"messages": formatted_messages}
     else:
         # Single example
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": example["prompt"]}
+            {"role": "user", "content": example["prompt"]},
+            {"role": "assistant", "content": example["completion"]}
         ]
-        return {
-            "prompt": [messages],
-            "completion": [example["completion"]]
-        }
+        return {"messages": messages}
 
 
 def setup_distributed_training():
@@ -168,13 +163,66 @@ def main():
         dist.barrier()
 
     # Dataset
+
+    # After loading your datasets, apply the formatting:
     #TODO: remove select after testing
     dataset_train = datasets.load_dataset("json", data_files=args.data_path_train, split="train").shuffle(seed=35).select(range(1000))
     dataset_valid = datasets.load_dataset("json", data_files=args.data_path_valid, split="train").shuffle(seed=35).select(range(50))
     
+    # Model configs
+    model_name_or_path = args.model_name_or_path
+    peft_config = None
+
+    # Load tokenizer (moved up to be available for filtering)
+    tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    
+    # Check if tokenizer has a chat template
+    has_chat_template = hasattr(tokenizer, 'chat_template') and tokenizer.chat_template is not None
+    
+    if local_rank == 0:
+        if has_chat_template:
+            print(f"Using existing chat template from {model_name_or_path}")
+            print(f"Chat template preview: {tokenizer.chat_template[:200]}...")
+        else:
+            print(f"No chat template found for {model_name_or_path}, using fallback template")
+    
+    # Only set fallback if no template exists
+    if not has_chat_template:
+        # Fallback chat template for models without one
+        tokenizer.chat_template = "{% for message in messages %}{% if message['role'] == 'system' %}{{ '<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n' + message['content'] + '<|eot_id|>' }}{% elif message['role'] == 'user' %}{{ '<|start_header_id|>user<|end_header_id|>\n\n' + message['content'] + '<|eot_id|>' }}{% elif message['role'] == 'assistant' %}{{ '<|start_header_id|>assistant<|end_header_id|>\n\n' + message['content'] + '<|eot_id|>' }}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<|start_header_id|>assistant<|end_header_id|>\n\n' }}{% endif %}"
+
+    dataset_train = dataset_train.map(format_instruction, batched=True, remove_columns=dataset_train.column_names)
+    dataset_valid = dataset_valid.map(format_instruction, batched=True, remove_columns=dataset_valid.column_names)
+
+    # Then apply filtering with debug info
+    original_train_size = len(dataset_train)
+    original_valid_size = len(dataset_valid)
+    
+    # Debug: Check a sample before filtering
+    if local_rank == 0 and len(dataset_train) > 0:
+        sample = dataset_train[0]
+        print(f"Sample before filtering: {sample.keys()}")
+        if "messages" in sample:
+            print(f"Sample messages structure: {sample['messages'][:200] if isinstance(sample['messages'], str) else sample['messages']}")
+            try:
+                formatted = tokenizer.apply_chat_template(sample["messages"], tokenize=False, add_generation_prompt=False)
+                tokens = tokenizer.encode(formatted)
+                print(f"Sample token length: {len(tokens)} (max: {MAX_SEQ_LENGTH})")
+            except Exception as e:
+                print(f"Error processing sample: {e}")
+    
+    dataset_train = dataset_train.filter(lambda x: filter_by_length_messages(x, tokenizer, MAX_SEQ_LENGTH))
+    dataset_valid = dataset_valid.filter(lambda x: filter_by_length_messages(x, tokenizer, MAX_SEQ_LENGTH))
+    
     # Print dataset info
     if local_rank == 0:
-        print(f"Dataset size: training {len(dataset_train)}, validation {len(dataset_valid)}")
+        print(f"Filtered dataset sizes:")
+        print(f"  Training: {original_train_size} -> {len(dataset_train)}")
+        print(f"  Validation: {original_valid_size} -> {len(dataset_valid)}")
+        if len(dataset_train) == 0:
+            print("WARNING: Training dataset is empty after filtering!")
 
     # record every 5% of the dataset
     batch_size = 4
@@ -183,32 +231,7 @@ def main():
     if local_rank == 0:
         print(f"logging_steps: {logging_steps}")
 
-    # Model configs
-    model_name_or_path = args.model_name_or_path
-    peft_config = None
-
-    # Load tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    
-    # Set up chat template if not already present
-    if not hasattr(tokenizer, 'chat_template') or tokenizer.chat_template is None:
-        # Default chat template for llama-style models
-        tokenizer.chat_template = "{% for message in messages %}{% if message['role'] == 'system' %}{{ '<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n' + message['content'] + '<|eot_id|>' }}{% elif message['role'] == 'user' %}{{ '<|start_header_id|>user<|end_header_id|>\n\n' + message['content'] + '<|eot_id|>' }}{% elif message['role'] == 'assistant' %}{{ '<|start_header_id|>assistant<|end_header_id|>\n\n' + message['content'] + '<|eot_id|>' }}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<|start_header_id|>assistant<|end_header_id|>\n\n' }}{% endif %}"
-
     # (No response_template used in original config)
-    
-    # Apply filtering to remove examples that are too long
-    original_train_size = len(dataset_train)
-    original_valid_size = len(dataset_valid)
-    dataset_train = dataset_train.filter(lambda x: filter_by_length(x, tokenizer, format_instruction, MAX_SEQ_LENGTH))
-    dataset_valid = dataset_valid.filter(lambda x: filter_by_length(x, tokenizer, format_instruction, MAX_SEQ_LENGTH))
-    
-    if local_rank == 0:
-        print(f"Filtered dataset by length (max {MAX_SEQ_LENGTH-1} tokens):")
-        print(f"  Training: {original_train_size} -> {len(dataset_train)} examples")
-        print(f"  Validation: {original_valid_size} -> {len(dataset_valid)} examples")
     
 
     # Load model with device_map
@@ -248,8 +271,9 @@ def main():
         output_dir=args.output_path,
         # Using callback, stop at each epoch, so specify num_train_epochs
         # the same as the total epoch in one-call training
-        num_train_epochs=args.local_epoch * args.num_rounds,
-        per_device_train_batch_size=batch_size,
+        num_train_epochs=1,
+        # args.local_epoch * args.num_rounds,
+        per_device_train_batch_size=1,
         gradient_accumulation_steps=gra_accu_steps,
         gradient_checkpointing=False,
         gradient_checkpointing_kwargs={"use_reentrant": False},
@@ -266,12 +290,13 @@ def main():
         lr_scheduler_type=args.lr_scheduler,
         lr_scheduler_kwargs={"num_cycles": 2},
         disable_tqdm=True,
+        max_steps=1,
         save_total_limit=2,
         # safetensors will remove shared layers, e.g. lm_head.weight
         # disable for local checkpointing
         eval_strategy="steps",
         eval_on_start=True,
-        eval_steps=50,
+        eval_steps=1,
         save_safetensors=False,
         seed=0,
         data_seed=0,
@@ -285,17 +310,29 @@ def main():
         max_length=MAX_SEQ_LENGTH,
     )
 
+    # trainer = SFTTrainer(
+    #     model=model,
+    #     train_dataset=dataset_train,
+    #     eval_dataset=dataset_valid,
+    #     peft_config=peft_config,
+    #     # max_seq_length=MAX_SEQ_LENGTH,
+    #     processing_class=tokenizer,
+    #     compute_metrics=partial(compute_metrics, tokenizer=tokenizer, verbose=True),
+    #     preprocess_logits_for_metrics=lambda logits, labels: preprocess_logits_for_metrics(logits, labels, tokenizer),
+    #     args=train_args,
+    #     # Add a callback to stop training after one epoch
+    #     callbacks=[StopCallback()],
+    # )
+
     trainer = SFTTrainer(
         model=model,
-        train_dataset=dataset_train,
-        eval_dataset=dataset_valid,
+        train_dataset=dataset_train,  # Now in messages format
+        eval_dataset=dataset_valid,   # Now in messages format
         peft_config=peft_config,
-        # max_seq_length=MAX_SEQ_LENGTH,
         processing_class=tokenizer,
         compute_metrics=partial(compute_metrics, tokenizer=tokenizer, verbose=True),
         preprocess_logits_for_metrics=lambda logits, labels: preprocess_logits_for_metrics(logits, labels, tokenizer),
-        args=train_args,
-        # Add a callback to stop training after one epoch
+        args=train_args,  # completion_only_loss=True is correct
         callbacks=[StopCallback()],
     )
 

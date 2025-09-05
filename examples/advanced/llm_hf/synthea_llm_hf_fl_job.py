@@ -196,7 +196,7 @@ def define_parser():
     parser.add_argument(
         "--model_name_or_path",
         type=str,
-        default="meta-llama/llama-3.2-1b",
+        default="meta-llama/llama-3.1-8B-Instruct",
         help="model name or path",
     )
     parser.add_argument(
