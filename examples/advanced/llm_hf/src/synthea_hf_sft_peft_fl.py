@@ -271,9 +271,8 @@ def main():
         output_dir=args.output_path,
         # Using callback, stop at each epoch, so specify num_train_epochs
         # the same as the total epoch in one-call training
-        num_train_epochs=1,
-        # args.local_epoch * args.num_rounds,
-        per_device_train_batch_size=1,
+        num_train_epochs= args.local_epoch * args.num_rounds,
+        per_device_train_batch_size=2,
         gradient_accumulation_steps=gra_accu_steps,
         gradient_checkpointing=False,
         gradient_checkpointing_kwargs={"use_reentrant": False},
@@ -290,13 +289,12 @@ def main():
         lr_scheduler_type=args.lr_scheduler,
         lr_scheduler_kwargs={"num_cycles": 2},
         disable_tqdm=True,
-        max_steps=1,
         save_total_limit=2,
         # safetensors will remove shared layers, e.g. lm_head.weight
         # disable for local checkpointing
         eval_strategy="steps",
         eval_on_start=True,
-        eval_steps=1,
+        eval_steps=50,
         save_safetensors=False,
         seed=0,
         data_seed=0,
