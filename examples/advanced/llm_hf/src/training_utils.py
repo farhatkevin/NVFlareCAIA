@@ -13,169 +13,219 @@ def get_answer_token_ids(tokenizer, choices=("A","B","C","D","E")) -> List[int]:
         ids.add(enc[-1])
     return sorted(ids)
 
-def preprocess_logits_for_metrics(logits, labels, tokenizer=None):
-    """
-    For each sample, find the answer token that appears after the assistant header.
+# def preprocess_logits_for_metrics(logits, labels, tokenizer=None):
+    # """
+    # For each sample, find the answer token that appears after the assistant header.
     
-    - Looks for the pattern: <|start_header_id|>assistant<|end_header_id|>
-    - Then finds the first answer token (A, B, C, D, or E) after this pattern
-    - Selects the logits that predict this answer token
-    """
-    if isinstance(logits, tuple):
-        logits = logits[0]  # [B, S, V]
+    # - Looks for the pattern: <|start_header_id|>assistant<|end_header_id|>
+    # - Then finds the first answer token (A, B, C, D, or E) after this pattern
+    # - Selects the logits that predict this answer token
+    # """
+    # if isinstance(logits, tuple):
+    #     logits = logits[0]  # [B, S, V]
 
-    with torch.no_grad():
-        B, S, V = logits.shape
+    # with torch.no_grad():
+    #     B, S, V = logits.shape
+    #     print("batch size: ", B)
 
-        if not torch.is_tensor(labels):
-            labels_t = torch.tensor(labels, device=logits.device)
-        else:
-            labels_t = labels.to(logits.device)
-
-        # Get token IDs for the assistant header pattern
-        if tokenizer is not None:
-            # Encode the assistant header tokens
-            start_header_id = tokenizer.encode("<|start_header_id|>", add_special_tokens=False)[0]
-            assistant_id = tokenizer.encode("assistant", add_special_tokens=False)[0]
-            end_header_id = tokenizer.encode("<|end_header_id|>", add_special_tokens=False)[0]
-            answer_token_ids = get_answer_token_ids(tokenizer)
-        else:
-            # Fallback values for common tokenizers
-            start_header_id = 128006  # Common for Llama models
-            assistant_id = 78191      # Common for "assistant"
-            end_header_id = 128007    # Common for Llama models
-            answer_token_ids = [32, 33, 34, 35, 36]  # A, B, C, D, E
+    #     if not torch.is_tensor(labels):
+    #         labels_t = torch.tensor(labels, device=logits.device)
+    #     else:
+    #         labels_t = labels.to(logits.device)
+    #     print(f"{labels_t=}")
+    #     # Get token IDs for the assistant header pattern
+    #     if tokenizer is not None:
+    #         # Encode the assistant header tokens
+    #         start_header_id = tokenizer.encode("<|start_header_id|>", add_special_tokens=False)[0]
+    #         assistant_id = tokenizer.encode("assistant", add_special_tokens=False)[0]
+    #         end_header_id = tokenizer.encode("<|end_header_id|>", add_special_tokens=False)[0]
+    #         answer_token_ids = get_answer_token_ids(tokenizer)
+    #     else:
+    #         # Fallback values for common tokenizers
+    #         start_header_id = 128006  # Common for Llama models
+    #         assistant_id = 78191      # Common for "assistant"
+    #         end_header_id = 128007    # Common for Llama models
+    #         answer_token_ids = [32, 33, 34, 35, 36]  # A, B, C, D, E
         
-        # Find the answer position for each sample
-        answer_positions = []
-        for b in range(B):
-            sample_labels = labels_t[b]
-            found_answer_pos = -1
+    #     # Find the answer position for each sample
+    #     answer_positions = []
+    #     for b in range(B):
+    #         sample_labels = labels_t[b]
 
-            # Prefer the LAST non-ignored A–E token in the sequence (assistant reply is at the end)
-            for j in range(S - 1, -1, -1):
-                tok = int(sample_labels[j].item())
-                if tok != -100 and tok in answer_token_ids:
-                    found_answer_pos = j
-                    break
+    #         print(f"Sample {b} labels: ", sample_labels)
+    #         found_answer_pos = -1
 
-            # Fallback: try to find after assistant header if present (labels may mask headers)
-            if found_answer_pos == -1:
-                for i in range(S - 4):
-                    if (
-                        sample_labels[i] == start_header_id
-                        and i + 1 < S
-                        and sample_labels[i + 1] == assistant_id
-                        and i + 2 < S
-                        and sample_labels[i + 2] == end_header_id
-                    ):
-                        for j in range(i + 3, S):
-                            tok = int(sample_labels[j].item())
-                            if tok != -100 and tok in answer_token_ids:
-                                found_answer_pos = j
-                                break
-                        if found_answer_pos != -1:
-                            break
+    #         # Prefer the LAST non-ignored A–E token in the sequence (assistant reply is at the end)
+    #         for j in range(S - 1, -1, -1):
+    #             tok = int(sample_labels[j].item())
+    #             if tok != -100 and tok in answer_token_ids:
+    #                 found_answer_pos = j
+    #                 break
 
-            # Final fallback: use last non-masked position
-            if found_answer_pos == -1:
-                mask = (sample_labels != -100)
-                if mask.any():
-                    # Find the last non-masked position
-                    non_masked_positions = torch.where(mask)[0]
-                    found_answer_pos = non_masked_positions[-1].item()
-                else:
-                    found_answer_pos = S - 1
+    #         # Fallback: try to find after assistant header if present (labels may mask headers)
+    #         if found_answer_pos == -1:
+    #             for i in range(S - 4):
+    #                 if (
+    #                     sample_labels[i] == start_header_id
+    #                     and i + 1 < S
+    #                     and sample_labels[i + 1] == assistant_id
+    #                     and i + 2 < S
+    #                     and sample_labels[i + 2] == end_header_id
+    #                 ):
+    #                     for j in range(i + 3, S):
+    #                         tok = int(sample_labels[j].item())
+    #                         if tok != -100 and tok in answer_token_ids:
+    #                             found_answer_pos = j
+    #                             break
+    #                     if found_answer_pos != -1:
+    #                         break
+
+    #         print(sample_labels[found_answer_pos - 3 : found_answer_pos + 3] if found_answer_pos != -1 else "No answer token found")
+    #         # Final fallback: use last non-masked position
+    #         # if found_answer_pos == -1:
+    #         #     mask = (sample_labels != -100)
+    #         #     if mask.any():
+    #         #         # Find the last non-masked position
+    #         #         non_masked_positions = torch.where(mask)[0]
+    #         #         found_answer_pos = non_masked_positions[-1].item()
+    #         #     else:
+    #         #         found_answer_pos = S - 1
             
-            answer_positions.append(found_answer_pos)
+    #         answer_positions.append(found_answer_pos)
         
-        # Convert to tensor
-        answer_pos = torch.tensor(answer_positions, device=logits.device)
-        print("answer positions: ", answer_pos)
+    #     # Convert to tensor
+    #     answer_pos = torch.tensor(answer_positions, device=logits.device)
+    #     print("answer positions: ", answer_pos)
+
+    #     print("token at this position:", tokenizer.decode([labels_t[0, answer_pos[0]]]) if tokenizer is not None else labels_t[0, answer_pos[0]].item())
+    #     # logits[t-1] predicts labels[t], so use answer_pos-1
+    #     pred_pos = torch.clamp(answer_pos - 1, min=0)
         
-        print("token at this position:", tokenizer.decode([labels_t[0, answer_pos[0]]]) if tokenizer is not None else labels_t[0, answer_pos[0]].item())
-        # logits[t-1] predicts labels[t], so use answer_pos-1
-        pred_pos = torch.clamp(answer_pos - 1, min=0)
+    #     # Select the logits at the prediction positions
+    #     pos = pred_pos
+
+    #     row = torch.arange(B, device=logits.device)
+    #     selected_logits = logits[row, pos, :]          # [B, V] - logits that predict answer
+
+    #     print("selected logits: " , selected_logits)
+
+    #     debug_count = getattr(preprocess_logits_for_metrics, 'debug_count', 0) + 1
+    #     preprocess_logits_for_metrics.debug_count = debug_count
         
-        # Select the logits at the prediction positions
-        pos = pred_pos
-
-        row = torch.arange(B, device=logits.device)
-        selected_logits = logits[row, pos, :]          # [B, V] - logits that predict answer
-
-        print("selected logits: " , selected_logits)
-
-        debug_count = getattr(preprocess_logits_for_metrics, 'debug_count', 0) + 1
-        preprocess_logits_for_metrics.debug_count = debug_count
-        
-        # Always print for the first eval batch (we reset debug_count before each eval)
-        if debug_count == 1 and tokenizer is not None:
-            print(f"=== POSITION DEBUG (call #{debug_count}) ===")
-            sample_0_labels = labels_t[0].cpu().numpy()
-            print(f"Sample 0 label structure around answer:")
-            answer_pos_val = answer_pos[0].item()
-            pred_position = pos[0].item()
+    #     # Always print for the first eval batch (we reset debug_count before each eval)
+    #     if debug_count == 1 and tokenizer is not None:
+    #         print(f"=== POSITION DEBUG (call #{debug_count}) ===")
+    #         sample_0_labels = labels_t[0].cpu().numpy()
+    #         print(f"Sample 0 label structure around answer:")
+    #         answer_pos_val = answer_pos[0].item()
+    #         pred_position = pos[0].item()
             
-            print(f"Looking for assistant header tokens: {start_header_id}, {assistant_id}, {end_header_id}")
-            print(f"Answer token IDs: {answer_token_ids}")
+    #         print(f"Looking for assistant header tokens: {start_header_id}, {assistant_id}, {end_header_id}")
+    #         print(f"Answer token IDs: {answer_token_ids}")
             
-            # Show the actual answer token found
-            if answer_pos_val < len(sample_0_labels):
-                actual_answer_token = sample_0_labels[answer_pos_val]
-                if actual_answer_token in answer_token_ids:
-                    answer_letter = tokenizer.decode([actual_answer_token])
-                    print(f"Found answer token at pos {answer_pos_val}: {actual_answer_token} ({answer_letter})")
-                else:
-                    token_str = tokenizer.decode([actual_answer_token]) if actual_answer_token != -100 else "MASKED"
-                    print(f"WARNING: Position {answer_pos_val} has token {actual_answer_token} ({token_str}), not an answer token!")
+    #         # Show the actual answer token found
+    #         if answer_pos_val < len(sample_0_labels):
+    #             actual_answer_token = sample_0_labels[answer_pos_val]
+    #             if actual_answer_token in answer_token_ids:
+    #                 answer_letter = tokenizer.decode([actual_answer_token])
+    #                 print(f"Found answer token at pos {answer_pos_val}: {actual_answer_token} ({answer_letter})")
+    #             else:
+    #                 token_str = tokenizer.decode([actual_answer_token]) if actual_answer_token != -100 else "MASKED"
+    #                 print(f"WARNING: Position {answer_pos_val} has token {actual_answer_token} ({token_str}), not an answer token!")
             
-            # Show full attention mask (labels != -100) and a small window around the answer
-            mask_vec = (sample_0_labels != -100).astype(int)
-            wide_start = max(0, answer_pos_val - 10)
-            wide_end = min(len(sample_0_labels), answer_pos_val + 10)
-            print(f"\nFull attention mask (1=labelled, 0=ignored): {mask_vec.tolist()}")
-            print(f"Mask around answer (pos {wide_start}..{wide_end}): {mask_vec[wide_start:wide_end].tolist()}")
+    #         # Show full attention mask (labels != -100) and a small window around the answer
+    #         mask_vec = (sample_0_labels != -100).astype(int)
+    #         wide_start = max(0, answer_pos_val - 10)
+    #         wide_end = min(len(sample_0_labels), answer_pos_val + 10)
+    #         print(f"\nFull attention mask (1=labelled, 0=ignored): {mask_vec.tolist()}")
+    #         print(f"Mask around answer (pos {wide_start}..{wide_end}): {mask_vec[wide_start:wide_end].tolist()}")
             
-            print(f"Using prediction position: {pred_position} (answer_pos: {answer_pos_val})")
-            print("=" * 30)
+    #         print(f"Using prediction position: {pred_position} (answer_pos: {answer_pos_val})")
+    #         print("=" * 30)
 
-        if tokenizer is not None:
-            allowed_ids = get_answer_token_ids(tokenizer)  # token ids for A..E
-            mask_vec = torch.full((V,), float("-inf"),
-                                  device=selected_logits.device,
-                                  dtype=selected_logits.dtype)
-            mask_vec[allowed_ids] = 0
-            selected_logits = selected_logits + mask_vec
+    #     if tokenizer is not None:
+    #         allowed_ids = get_answer_token_ids(tokenizer)  # token ids for A..E
+    #         mask_vec = torch.full((V,), float("-inf"),
+    #                               device=selected_logits.device,
+    #                               dtype=selected_logits.dtype)
+    #         mask_vec[allowed_ids] = 0
+    #         selected_logits = selected_logits + mask_vec
 
-            if debug_count == 1:
-                try:
-                    letters = [tokenizer.decode([tid]) for tid in allowed_ids]
-                except Exception:
-                    letters = [str(tid) for tid in allowed_ids]
-                ae_scores = selected_logits[:, allowed_ids].detach().float().cpu()
-                print("Choice logits at prediction position (A–E):")
-                for i in range(B):
-                    pos_i = int(pos[i].item())
-                    answer_pos_i = int(answer_pos[i].item())
-                    # True answer if available
-                    true_ans = None
-                    if answer_pos_i < S:
-                        true_token = int(labels_t[i, answer_pos_i].item())
-                        if true_token in allowed_ids:
-                            true_ans = tokenizer.decode([true_token])
-                    row_scores = ae_scores[i].tolist()
-                    per_choice = ", ".join(f"{l}:{s:.3f}" for l, s in zip(letters, row_scores))
-                    print(f"  sample {i} (pred_pos={pos_i}): {per_choice}"
-                          + (f" | true={true_ans}" if true_ans is not None else ""))
+    #         if debug_count == 1:
+    #             try:
+    #                 letters = [tokenizer.decode([tid]) for tid in allowed_ids]
+    #             except Exception:
+    #                 letters = [str(tid) for tid in allowed_ids]
+    #             ae_scores = selected_logits[:, allowed_ids].detach().float().cpu()
+    #             print("Choice logits at prediction position (A–E):")
+    #             for i in range(B):
+    #                 pos_i = int(pos[i].item())
+    #                 answer_pos_i = int(answer_pos[i].item())
+    #                 # True answer if available
+    #                 true_ans = None
+    #                 if answer_pos_i < S:
+    #                     true_token = int(labels_t[i, answer_pos_i].item())
+    #                     if true_token in allowed_ids:
+    #                         true_ans = tokenizer.decode([true_token])
+    #                 row_scores = ae_scores[i].tolist()
+    #                 per_choice = ", ".join(f"{l}:{s:.3f}" for l, s in zip(letters, row_scores))
+    #                 print(f"  sample {i} (pred_pos={pos_i}): {per_choice}"
+    #                       + (f" | true={true_ans}" if true_ans is not None else ""))
 
-        preds = selected_logits.argmax(dim=-1)         # [B] token IDs
-        return preds
+    #     preds = selected_logits.argmax(dim=-1)         # [B] token IDs
+    #     return preds
 
+
+def preprocess_logits_for_metrics(logits, labels):
+      """
+      Preprocess logits for multiple choice evaluation where answers are single letters A-E.
+      
+      Args:
+          logits: Model logits of shape (batch_size, seq_len, vocab_size)
+          labels: Ground truth labels of shape (batch_size, seq_len)
+      
+      Returns:
+          Processed logits for metric calculation
+      """
+      import torch
+
+      # Get tokenizer to find token IDs for A, B, C, D, E
+      # Assuming these are the token IDs - you may need to adjust based on your tokenizer
+      choice_tokens = {
+          'A': 32, 'B': 33, 'C': 34, 'D': 35, 'E': 36  # Example token IDs
+      }
+
+      # Extract logits only for the choice tokens
+      choice_token_ids = list(choice_tokens.values())
+
+      # Get logits for the last non-padding token (where the answer should be)
+      batch_size = logits.shape[0]
+      last_token_logits = []
+
+      for i in range(batch_size):
+          # Find the last non-padding token position
+          non_pad_positions = (labels[i] != -100).nonzero(as_tuple=True)[0]
+        #   print(f"Sample {i} non-pad positions: {non_pad_positions.tolist()}")
+          if len(non_pad_positions) > 0:
+              #TODO: this is assuming eos token before answer token
+              last_pos = non_pad_positions[-2]
+              print(f"Sample {i}: last non-pad position for prediction is {last_pos.item()}")
+              print(labels[i, last_pos-3:last_pos+3])  # Show context around prediction
+            #   last_token_logits.append(logits[i, last_pos, choice_token_ids])
+              last_token_logits.append(logits[i, last_pos, choice_token_ids].argmax(dim=-1))
+              print("last token logits: ", last_token_logits)
+          else:
+              # If no valid positions, use zeros
+              print("failling")
+              last_token_logits.append(torch.zeros(len(choice_token_ids)))
+
+      return torch.stack(last_token_logits)
 
 def compute_metrics(eval_preds: EvalPrediction, tokenizer, verbose=True) -> Dict[str, float]:
     """Compare argmax predictions to true labels for accuracy"""
     pred_ids, labels = eval_preds
-
+    print(f"{pred_ids=}")
+    print(f"{labels=}")
     if verbose:
         # Debug: Show label structure for MULTIPLE samples to check variety
         print(f"=== LABEL DEBUG - BATCH ANALYSIS ===")
@@ -263,19 +313,34 @@ def compute_metrics(eval_preds: EvalPrediction, tokenizer, verbose=True) -> Dict
     for i in range(labels.shape[0]):
         row = labels[i]
         idxs = np.where(row != -100)[0]
+        print(f"row: {row}, idxs: {idxs}")
         t_id = -1
         for j in reversed(idxs.tolist()):
             if row[j] in answer_ids:
+                print(f"found answer token {row[j]} at position {j}")
                 t_id = int(row[j])
+                print("position where token is found: ", j)
+                print("idk", row[j-3:j+4])
+                print("token_id:", t_id)
                 break
         true_ids.append(t_id)
 
     true_ids = np.array(true_ids, dtype=np.int64)
+    print("true_ids: ", true_ids)
     valid_idx = np.where(true_ids != -1)[0]
+    print("valid idx: ", valid_idx)
     if valid_idx.size == 0:
         return {"accuracy": 0.0}
     y_true = true_ids[valid_idx]
+    print("y_true: ", y_true)
     y_pred = pred_ids[valid_idx]
+    dicti = { 0:32, 1:33, 2:34, 3:35, 4:36 }
+    for i in range(len(y_pred)):
+        if y_pred[i] in dicti:
+            y_pred[i] = dicti[y_pred[i]]
+
+
+    print("y_pred: ", y_pred)
     # Truncate to common length if needed (defensive)
     m = min(len(y_true), len(y_pred))
     if m == 0:

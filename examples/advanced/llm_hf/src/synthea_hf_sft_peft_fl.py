@@ -331,7 +331,8 @@ def main():
         peft_config=peft_config,
         processing_class=tokenizer,
         compute_metrics=partial(compute_metrics, tokenizer=tokenizer, verbose=True),
-        preprocess_logits_for_metrics=lambda logits, labels: preprocess_logits_for_metrics(logits, labels, tokenizer),
+        # preprocess_logits_for_metrics=lambda logits, labels: preprocess_logits_for_metrics(logits, labels, tokenizer),
+        preprocess_logits_for_metrics=preprocess_logits_for_metrics,
         args=train_args,  # completion_only_loss=True is correct
         callbacks=[StopCallback()],
     )
