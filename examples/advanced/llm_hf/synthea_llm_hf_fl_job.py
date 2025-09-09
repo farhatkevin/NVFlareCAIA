@@ -24,6 +24,8 @@ from nvflare.app_opt.pt.quantization.quantizer import ModelQuantizer
 from nvflare.job_config.script_runner import ScriptRunner, BaseScriptRunner
 from nvflare.private.fed.utils.fed_utils import split_gpus
 
+from src.hf_file_model_persistor import HFFileModelPersistor
+
 
 def main():
     args = define_parser()
@@ -90,7 +92,17 @@ def main():
         job.to("src/hf_peft_model.py", "server")
         # Then send the model persistor to the server
         model_args = {"path": "src.hf_peft_model.CausalLMPEFTModel", "args": {"model_name_or_path": model_name_or_path}}
-    job.to(PTFileModelPersistor(model=model_args, allow_numpy_conversion=False), "server", id="persistor")
+
+    #change to using HFFileModelPersistor
+    # job.to(PTFileModelPersistor(model=model_args, allow_numpy_conversion=False), "server", id="persistor")
+
+    job.to(HFFileModelPersistor(
+        model=model_args, 
+        allow_numpy_conversion=False,
+        global_model_file_name="global_model",  # This is the directory name
+        best_global_model_file_name="best_global_model",
+        model_name_or_path=args.model_name_or_path  # Pass the model name or path
+    ), "server", id="persistor")
 
     # Add model selection widget and send to server
     job.to(IntimeModelSelector(key_metric="eval_accuracy", negate_key_metric=False), "server", id="model_selector")
