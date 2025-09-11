@@ -134,7 +134,7 @@ def main():
         # Add additional parameters to clients
         # TODO: this code is problematic, if i keep it i get AttributeError: 'dict' object has no attribute '__module__'. Did you mean: '__reduce__'?
         # if i remove the code, we can run, but the client timeout is not set and i keep hitting timeout errors (no quantization)
-        # with quantization, no errors with timeout, training happens normaly 
+        # with quantization, no errors with timeout, training happens normaly
         # client_params = {"task_result_timeout": 300}
         # job.to_clients(client_params)
 

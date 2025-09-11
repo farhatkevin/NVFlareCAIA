@@ -11,3 +11,6 @@ python3 synthea_llm_hf_fl_job.py \
  --quantize_mode float16 \
  --num_rounds 2 \
  --model_name_or_path meta-llama/Llama-3.2-1B-Instruct\
+ --loss_log_file loss.txt \
+ --eval_dump_file eval_dump.jsonl
+

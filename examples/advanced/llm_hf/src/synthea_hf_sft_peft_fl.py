@@ -15,11 +15,11 @@
 import argparse
 import copy
 import os
-from functools import partial
 
 # Add deterministic seed for reproducibility illustration
 import random
 import shutil
+from functools import partial
 
 import datasets
 import numpy as np
@@ -27,19 +27,23 @@ import torch
 import torch.distributed as dist
 from accelerate import PartialState
 from peft import LoraConfig, get_peft_model, get_peft_model_state_dict, set_peft_model_state_dict, utils
+from training_utils import (
+    EvalDumpRecordedCallback,
+    compute_metrics,
+    create_loss_logger,
+    filter_by_length_messages,
+    format_instruction,
+    preprocess_logits_for_metrics,
+    wrap_compute_metrics,
+)
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback, trainer_utils
 from trl import SFTConfig, SFTTrainer
 
 import nvflare.client as flare
-from training_utils import (
-    compute_metrics,
-    preprocess_logits_for_metrics,
-    filter_by_length_messages,
-    test_generation_with_pipeline,
-    test_generation_with_generate,
-)
 
 MAX_SEQ_LENGTH = 4096
+
+
 # Add callback to stop at each epoch
 class StopCallback(TrainerCallback):
     def on_epoch_end(self, args, state, control, logs=None, **kwargs):
@@ -50,30 +54,6 @@ class StopCallback(TrainerCallback):
 torch.manual_seed(0)
 random.seed(0)
 np.random.seed(0)
-
-def format_instruction(example):
-    """Convert to messages format that TRL expects"""
-    system_prompt = "You are a medical AI expert."
-    
-    if isinstance(example["prompt"], list):
-        # Batch processing
-        formatted_messages = []
-        for i, prompt in enumerate(example["prompt"]):
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt},
-                {"role": "assistant", "content": example["completion"][i]}
-            ]
-            formatted_messages.append(messages)
-        return {"messages": formatted_messages}
-    else:
-        # Single example
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": example["prompt"]},
-            {"role": "assistant", "content": example["completion"]}
-        ]
-        return {"messages": messages}
 
 
 def setup_distributed_training():
@@ -141,6 +121,24 @@ def main():
     )
     parser.add_argument("--local_epoch", type=int, default=1)
     parser.add_argument("--num_rounds", type=int, default=3)
+    parser.add_argument(
+        "--site_name",
+        type=str,
+        default=os.getenv("NVFLARE_SITE_NAME", "unknown"),
+        help="NVFlare site name for per-site loss logging",
+    )
+    parser.add_argument(
+        "--loss_log_file",
+        type=str,
+        default=None,
+        help="Optional explicit file to write loss logs; defaults to <output_path>/loss_<site>.log",
+    )
+    parser.add_argument(
+        "--eval_dump_file",
+        type=str,
+        default=None,
+        help="Optional JSONL file to append full eval generations each eval",
+    )
     args = parser.parse_args()
 
     # Setup distributed training
@@ -165,10 +163,14 @@ def main():
     # Dataset
 
     # After loading your datasets, apply the formatting:
-    #TODO: remove select after testing
-    dataset_train = datasets.load_dataset("json", data_files=args.data_path_train, split="train").shuffle(seed=35).select(range(1000))
-    dataset_valid = datasets.load_dataset("json", data_files=args.data_path_valid, split="train").shuffle(seed=35).select(range(50))
-    
+    # TODO: remove select after testing
+    dataset_train = (
+        datasets.load_dataset("json", data_files=args.data_path_train, split="train").shuffle().select(range(2000))
+    )
+    dataset_valid = (
+        datasets.load_dataset("json", data_files=args.data_path_valid, split="train").shuffle().select(range(50))
+    )
+
     # Model configs
     model_name_or_path = args.model_name_or_path
     peft_config = None
@@ -177,17 +179,17 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    
+
     # Check if tokenizer has a chat template
-    has_chat_template = hasattr(tokenizer, 'chat_template') and tokenizer.chat_template is not None
-    
+    has_chat_template = hasattr(tokenizer, "chat_template") and tokenizer.chat_template is not None
+
     if local_rank == 0:
         if has_chat_template:
             print(f"Using existing chat template from {model_name_or_path}")
             print(f"Chat template preview: {tokenizer.chat_template[:200]}...")
         else:
             print(f"No chat template found for {model_name_or_path}, using fallback template")
-    
+
     # Only set fallback if no template exists
     if not has_chat_template:
         # Fallback chat template for models without one
@@ -196,26 +198,64 @@ def main():
     dataset_train = dataset_train.map(format_instruction, batched=True, remove_columns=dataset_train.column_names)
     dataset_valid = dataset_valid.map(format_instruction, batched=True, remove_columns=dataset_valid.column_names)
 
+    # print first sample for verification
+    if local_rank == 0 and len(dataset_train) > 0:
+        ex = dataset_train[0]
+        msgs = ex["messages"]
+
+        # Prompt-only: drop the assistant turn; add assistant header for generation
+        msgs_prompt = msgs[:-1]
+        rendered_prompt = tokenizer.apply_chat_template(
+            msgs_prompt,
+            tokenize=False,
+            add_generation_prompt=True,  # adds assistant header + "\n\n"
+        )
+
+        # Encode rendered prompt exactly as fed to the model
+        enc = tokenizer(
+            rendered_prompt,
+            add_special_tokens=False,  # template already contains special tokens
+            return_tensors=None,
+        )
+        ids = enc["input_ids"]
+        # Handle both list[int] and list[list[int]] returns
+        if isinstance(ids, list) and len(ids) > 0 and isinstance(ids[0], list):
+            ids = ids[0]
+
+        print("=== Prompt-only debug ===")
+        print("Rendered tail:", repr(rendered_prompt[-160:]))
+        print("Token count:", len(ids))
+        print("Token ids tail:", ids[-40:])
+        print("Decoded tail:", tokenizer.decode(ids[-40:]))
+
+        # Optional: confirm newline tokenization
+        nl2 = tokenizer.encode("\n\n", add_special_tokens=False)
+        print("newline '\\n\\n' token ids:", nl2)
+
     # Then apply filtering with debug info
     original_train_size = len(dataset_train)
     original_valid_size = len(dataset_valid)
-    
+
     # Debug: Check a sample before filtering
     if local_rank == 0 and len(dataset_train) > 0:
         sample = dataset_train[0]
         print(f"Sample before filtering: {sample.keys()}")
         if "messages" in sample:
-            print(f"Sample messages structure: {sample['messages'][:200] if isinstance(sample['messages'], str) else sample['messages']}")
+            print(
+                f"Sample messages structure: {sample['messages'][:200] if isinstance(sample['messages'], str) else sample['messages']}"
+            )
             try:
-                formatted = tokenizer.apply_chat_template(sample["messages"], tokenize=False, add_generation_prompt=False)
+                formatted = tokenizer.apply_chat_template(
+                    sample["messages"], tokenize=False, add_generation_prompt=False
+                )
                 tokens = tokenizer.encode(formatted)
                 print(f"Sample token length: {len(tokens)} (max: {MAX_SEQ_LENGTH})")
             except Exception as e:
                 print(f"Error processing sample: {e}")
-    
+
     dataset_train = dataset_train.filter(lambda x: filter_by_length_messages(x, tokenizer, MAX_SEQ_LENGTH))
     dataset_valid = dataset_valid.filter(lambda x: filter_by_length_messages(x, tokenizer, MAX_SEQ_LENGTH))
-    
+
     # Print dataset info
     if local_rank == 0:
         print(f"Filtered dataset sizes:")
@@ -232,7 +272,6 @@ def main():
         print(f"logging_steps: {logging_steps}")
 
     # (No response_template used in original config)
-    
 
     # Load model with device_map
     default_dtype = torch.get_default_dtype()
@@ -271,7 +310,7 @@ def main():
         output_dir=args.output_path,
         # Using callback, stop at each epoch, so specify num_train_epochs
         # the same as the total epoch in one-call training
-        num_train_epochs= args.local_epoch * args.num_rounds,
+        num_train_epochs=args.local_epoch * args.num_rounds,
         per_device_train_batch_size=2,
         gradient_accumulation_steps=gra_accu_steps,
         gradient_checkpointing=False,
@@ -281,7 +320,7 @@ def main():
         optim="adamw_torch",
         logging_steps=20,
         save_strategy="epoch",
-        learning_rate=5e-4,
+        learning_rate=5e-6,
         bf16=True,
         max_grad_norm=0.3,
         warmup_ratio=0.03,
@@ -293,7 +332,7 @@ def main():
         # safetensors will remove shared layers, e.g. lm_head.weight
         # disable for local checkpointing
         eval_strategy="steps",
-        eval_on_start=True,
+        # eval_on_start=True,
         eval_steps=50,
         save_safetensors=False,
         seed=0,
@@ -301,39 +340,52 @@ def main():
         # Multi-GPU specific settings
         ddp_find_unused_parameters=False,
         dataloader_pin_memory=False,
-
         # Prompt Completion w/ Mitchell
         completion_only_loss=True,
         metric_for_best_model="eval_accuracy",
         max_length=MAX_SEQ_LENGTH,
     )
 
-    # trainer = SFTTrainer(
-    #     model=model,
-    #     train_dataset=dataset_train,
-    #     eval_dataset=dataset_valid,
-    #     peft_config=peft_config,
-    #     # max_seq_length=MAX_SEQ_LENGTH,
-    #     processing_class=tokenizer,
-    #     compute_metrics=partial(compute_metrics, tokenizer=tokenizer, verbose=True),
-    #     preprocess_logits_for_metrics=lambda logits, labels: preprocess_logits_for_metrics(logits, labels, tokenizer),
-    #     args=train_args,
-    #     # Add a callback to stop training after one epoch
-    #     callbacks=[StopCallback()],
-    # )
+    ##########################################################
+    ###   extra code for logging that we can remove later  ###
+    ##########################################################
+
+    # Set up per-site loss logger (rank 0 only writes)
+    site_name = args.site_name
+    loss_logger = create_loss_logger(
+        site_name=site_name, output_path=args.output_path, loss_log_file=args.loss_log_file, local_rank=local_rank
+    )
+
+    # Prepare compute_metrics wrapper and optional eval dump recorder
+    base_compute = partial(compute_metrics, tokenizer=tokenizer, verbose=True)
+    compute_fn = base_compute
+    eval_dump_cb = None
+    if args.eval_dump_file:
+        compute_fn = wrap_compute_metrics(base_compute)
+        dump_path = (
+            args.eval_dump_file
+            if os.path.isabs(args.eval_dump_file)
+            else os.path.join(args.output_path, args.eval_dump_file)
+        )
+        eval_dump_cb = EvalDumpRecordedCallback(out_path=dump_path, local_rank=local_rank)
+
+    ##########################################################
 
     trainer = SFTTrainer(
         model=model,
-        train_dataset=dataset_train,  # Now in messages format
-        eval_dataset=dataset_valid,   # Now in messages format
+        train_dataset=dataset_train,
+        eval_dataset=dataset_valid,
         peft_config=peft_config,
         processing_class=tokenizer,
-        compute_metrics=partial(compute_metrics, tokenizer=tokenizer, verbose=True),
-        # preprocess_logits_for_metrics=lambda logits, labels: preprocess_logits_for_metrics(logits, labels, tokenizer),
-        preprocess_logits_for_metrics=preprocess_logits_for_metrics,
-        args=train_args,  # completion_only_loss=True is correct
-        callbacks=[StopCallback()],
+        compute_metrics=compute_fn,
+        # need to pass in tokenizer to get encoded A–E labels, so using lambda function
+        preprocess_logits_for_metrics=lambda logits, labels: preprocess_logits_for_metrics(logits, labels, tokenizer),
+        # preprocess_logits_for_metrics=preprocess_logits_for_metrics,
+        args=train_args,
+        callbacks=[StopCallback(), loss_logger] + ([eval_dump_cb] if eval_dump_cb is not None else []),
     )
+
+    # Untouched from original
 
     # initializes NVFlare client API
     flare.init()
@@ -375,6 +427,11 @@ def main():
         if dist.is_initialized():
             dist.barrier()
 
+        # Update current round for logging, then evaluate the global model
+        try:
+            loss_logger.set_round(curr_round)
+        except Exception:
+            pass
         # Evaluate the global model (reset debug so first eval batch prints A–E logits)
         try:
             preprocess_logits_for_metrics.debug_count = 0
@@ -403,6 +460,9 @@ def main():
                 resume_from_checkpoint_folder = trainer_utils.get_last_checkpoint(trainer.args.output_dir)
                 if train_mode:
                     # PEFT model small, directly save via torch.save
+                    # TODO: remove this
+                    print("resume_from_checkpoint_folder:", resume_from_checkpoint_folder)
+                    print("utils.WEIGHTS_NAME:", utils.WEIGHTS_NAME)
                     resume_model_file_path = os.path.join(resume_from_checkpoint_folder, utils.WEIGHTS_NAME)
                     torch.save(global_model, resume_model_file_path)
                 else:

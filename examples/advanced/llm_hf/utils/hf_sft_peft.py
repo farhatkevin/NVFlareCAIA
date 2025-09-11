@@ -13,10 +13,11 @@
 # limitations under the License.
 
 import argparse
+import os
 
 # Add deterministic seed for reproducibility illustration
 import random
-import os
+
 import datasets
 import numpy as np
 import torch

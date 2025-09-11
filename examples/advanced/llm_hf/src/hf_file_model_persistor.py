@@ -1,16 +1,18 @@
-from transformers import AutoModelForCausalLM, AutoConfig, AutoTokenizer, PreTrainedModel
-import torch
 import os
 import time
 import traceback
-import numpy as np
 
-from nvflare.app_opt.pt.file_model_persistor import PTFileModelPersistor
-from nvflare.apis.fl_context import FLContext
+import numpy as np
+import torch
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, PreTrainedModel
+
 from nvflare.apis.event_type import EventType
-from nvflare.app_common.app_event_type import AppEventType
-from nvflare.app_common.app_constant import AppConstants
+from nvflare.apis.fl_context import FLContext
 from nvflare.app_common.abstract.model import ModelLearnable
+from nvflare.app_common.app_constant import AppConstants
+from nvflare.app_common.app_event_type import AppEventType
+from nvflare.app_opt.pt.file_model_persistor import PTFileModelPersistor
+
 
 class HFFileModelPersistor(PTFileModelPersistor):
     def __init__(
@@ -18,7 +20,7 @@ class HFFileModelPersistor(PTFileModelPersistor):
         exclude_vars=None,
         model=None,
         global_model_file_name="global_model",
-        best_global_model_file_name="best_global_model", 
+        best_global_model_file_name="best_global_model",
         source_ckpt_file_full_name=None,
         filter_id=None,
         load_weights_only=False,
@@ -36,7 +38,7 @@ class HFFileModelPersistor(PTFileModelPersistor):
             allow_numpy_conversion=allow_numpy_conversion,
         )
         self.model_name_or_path = model_name_or_path
-    
+
     def save_model_file(self, save_path: str):
         """Save aggregated global model both as NVFlare .pt and HF folder.
 
@@ -49,7 +51,7 @@ class HFFileModelPersistor(PTFileModelPersistor):
         # Get model state dict from NVFlare persistence manager
         save_dict = self.persistence_manager.to_persistence_dict()
 
-        # Always save the NVFlare/PT snapshot 
+        # Always save the NVFlare/PT snapshot
         torch.save(save_dict, save_path + ".pt")
         print(f"✅ SAVED PyTorch model to {save_path}.pt")
 
@@ -119,13 +121,12 @@ class HFFileModelPersistor(PTFileModelPersistor):
                 hf_model.save_pretrained(hf_save_path, safe_serialization=True, max_shard_size="10GB")
                 print(f"  ✅ Saved HF model to: {hf_save_path}")
 
-
             try:
                 tok = AutoTokenizer.from_pretrained(self.model_name_or_path, use_fast=True, trust_remote_code=True)
                 tok.save_pretrained(hf_save_path)
                 print("  ✅ Saved tokenizer files")
             except Exception as e:
-                print(f"  ⚠️ Could not save tokenizer via AutoTokenizer: {e}")    
+                print(f"  ⚠️ Could not save tokenizer via AutoTokenizer: {e}")
 
             # List directory contents for debug
             try:
@@ -146,11 +147,11 @@ class HFFileModelPersistor(PTFileModelPersistor):
 
     def handle_event(self, event: str, fl_ctx: FLContext):
         """Override to add debugging for events"""
-        
+
         if event == EventType.START_RUN:
             print(f"🚀 Initializing persistor")
             self._initialize(fl_ctx)
-            
+
         elif event == AppEventType.GLOBAL_BEST_MODEL_AVAILABLE:
             print(f"🏆 BEST MODEL EVENT: Saving best global model")
             # save the current model as the best model, or the global best model if available
@@ -160,7 +161,7 @@ class HFFileModelPersistor(PTFileModelPersistor):
                 self._get_persistence_manager(fl_ctx).update(ml)
             else:
                 print(f"  ⚠️ No global model found in context")
-                
+
             print(f"  💾 Saving to {self._best_ckpt_save_path}")
             self.save_model_file(self._best_ckpt_save_path)
             print(f"  ✅ Best model saved!")
@@ -168,10 +169,11 @@ class HFFileModelPersistor(PTFileModelPersistor):
     def save_model(self, ml: ModelLearnable, fl_ctx: FLContext):
         """Save model with round information from meta"""
         import time
+
         agg_start = time.time()
         print(f"📥 SAVE MODEL called")
         self._get_persistence_manager(fl_ctx).update(ml)
-        
+
         # Try to get round information from model meta
         current_round = None
 
@@ -180,7 +182,7 @@ class HFFileModelPersistor(PTFileModelPersistor):
                 current_round = ml.meta["CURRENT_ROUND"]
             elif "current_round" in ml.meta:
                 current_round = ml.meta["current_round"]
-        
+
         # Add debug to see all available meta keys
         if hasattr(ml, "meta") and ml.meta:
             print(f"  🔍 Available meta keys: {list(ml.meta.keys() if ml.meta else [])}")
@@ -192,11 +194,11 @@ class HFFileModelPersistor(PTFileModelPersistor):
             elif "current_round" in ml["meta"]:
                 current_round = ml["meta"]["current_round"]
             print(f"  🔍 Found current round: {current_round}")
-        
+
         # If we found round information
         if current_round is not None:
             print(f"  ℹ️ Current round: {current_round}")
-            
+
             # Save both standard and round-specific checkpoints
             # self.save_model_file(self._ckpt_save_path)  # Standard
             round_path = f"{os.path.dirname(self._ckpt_save_path)}/round_{current_round}_model"
@@ -204,7 +206,7 @@ class HFFileModelPersistor(PTFileModelPersistor):
         else:
             print(f"  ⚠️ No round information found in meta")
             self.save_model_file(self._ckpt_save_path)  # Save standard checkpoint only
-            
+
         agg_end = time.time()
         elapsed = agg_end - agg_start
         print(f"[AGGREGATION THROUGHPUT] Aggregation+save time: {elapsed:.2f} seconds")

@@ -11,6 +11,7 @@ Functions:
 """
 
 from typing import Tuple
+
 import torch
 
 
@@ -26,8 +27,7 @@ def build_chat_input(
     Mirrors chat_inference: apply_chat_template(messages, add_generation_prompt=True).
     Does not import chat_inference to avoid cross-dependencies.
     """
-    default_system = (
-z    )
+    default_system = z
     sys_prompt = system_prompt or default_system
 
     messages = [
@@ -82,4 +82,3 @@ def restricted_choice_logits_at_positions(
         return torch.softmax(masked_choices, dim=-1)
     else:
         return masked_choices
-
