@@ -10,12 +10,16 @@ from transformers import EvalPrediction, TrainerCallback
 
 
 def get_answer_token_ids(tokenizer, choices=("A", "B", "C", "D", "E")) -> List[int]:
-    """Get token IDs for multiple choice answer letters A, B, C, D, E"""
-    ids = set()
-    for letter in choices:
-        enc = tokenizer.encode(letter, add_special_tokens=False)
-        ids.add(enc[-1])
-    return sorted(ids)
+    """Return token IDs for choices in the given order (A–E by default).
+
+    This function preserves the order of `choices` so callers can map
+    class indices 0..len(choices)-1 directly to these IDs.
+    """
+    return [tokenizer.encode(ch, add_special_tokens=False)[-1] for ch in choices]
+
+
+# NOTE: get_answer_token_ids_ordered is no longer needed since
+# get_answer_token_ids already preserves order.
 
 
 def preprocess_logits_for_metrics(logits, labels, tokenizer):
@@ -31,10 +35,9 @@ def preprocess_logits_for_metrics(logits, labels, tokenizer):
     """
     import torch
 
-    # Get tokenizer to find token IDs for A, B, C, D, E
-    # Assuming these are the token IDs - you may need to adjust based on your tokenizer
+    # Token IDs for A–E in order for slicing logits consistently
     choice_token_ids = torch.tensor(
-        [tokenizer.encode(ch, add_special_tokens=False)[-1] for ch in ["A", "B", "C", "D", "E"]],
+        get_answer_token_ids(tokenizer, ("A", "B", "C", "D", "E")),
         device=logits.device,
         dtype=torch.long,
     )
@@ -50,11 +53,12 @@ def preprocess_logits_for_metrics(logits, labels, tokenizer):
         if len(non_pad_positions) > 0:
             # TODO: this is assuming eos token before answer token
             last_pos = non_pad_positions[-2]
-            #   print(f"Sample {i}: last non-pad position for prediction is {last_pos.item()}")
-            #   print(labels[i, last_pos-3:last_pos+3])  # Show context around prediction
+            # print(f"Sample {i}: last non-pad position for prediction is {last_pos.item()}")
+            # print(labels[i, last_pos-3:last_pos+3])  # Show context around prediction
             #   last_token_logits.append(logits[i, last_pos, choice_token_ids])
-            last_token_logits.append(logits[i, last_pos, choice_token_ids].argmax(dim=-1))
-        #   print("last token logits: ", last_token_logits)
+            # TODO: double check off-by-one here for last_pos
+            last_token_logits.append(logits[i, last_pos - 1, choice_token_ids].argmax(dim=-1))
+            # print("last token logits: ", last_token_logits)
         else:
             print("preprocessing logits is not finding any non-pad positions")
             last_token_logits.append(torch.zeros(choice_token_ids.shape[0], device=logits.device))
@@ -73,6 +77,7 @@ def compute_metrics(eval_preds: EvalPrediction, tokenizer, verbose=True) -> Dict
         return {"accuracy": 0.0}
 
     # Build y_true as the LAST non-ignored A–E token per sample (assistant answer at end)
+    # Ordered IDs; use set for membership checks
     answer_ids = get_answer_token_ids(tokenizer)
     true_ids = []
     for i in range(labels.shape[0]):
@@ -99,10 +104,11 @@ def compute_metrics(eval_preds: EvalPrediction, tokenizer, verbose=True) -> Dict
     y_true = true_ids[valid_idx]
     # print("y_true: ", y_true)
     y_pred = pred_ids[valid_idx]
-    mapping = {0: 32, 1: 33, 2: 34, 3: 35, 4: 36}
+    # Map predicted class indices (0..4) to tokenizer-specific token IDs for A–E
+    index_to_token = {i: tid for i, tid in enumerate(answer_ids)}
     for i in range(len(y_pred)):
-        if y_pred[i] in mapping:
-            y_pred[i] = mapping[y_pred[i]]
+        if y_pred[i] in index_to_token:
+            y_pred[i] = index_to_token[y_pred[i]]
 
     # print("y_pred: ", y_pred)
     # Truncate to common length if needed (defensive)
@@ -280,10 +286,11 @@ class EvalDumpCallback(TrainerCallback):
 class EvalDumpRecordedCallback(TrainerCallback):
     """Write the raw and decoded predictions used during evaluation to JSONL (no regeneration)."""
 
-    def __init__(self, out_path: str, local_rank: int = 0, include_labels: bool = True):
+    def __init__(self, out_path: str, local_rank: int = 0, include_labels: bool = True, tokenizer=None):
         self.out_path = out_path
         self.local_rank = local_rank
         self.include_labels = include_labels
+        self.tokenizer = tokenizer
         out_dir = os.path.dirname(out_path)
         if out_dir:
             os.makedirs(out_dir, exist_ok=True)
@@ -307,12 +314,17 @@ class EvalDumpRecordedCallback(TrainerCallback):
             "predictions_choice": preds_choice,
         }
         if self.include_labels and labels is not None:
+            # Build mapping based on tokenizer if available, else fallback
+            ordered_ids = (
+                get_answer_token_ids(self.tokenizer) if self.tokenizer is not None else [32, 33, 34, 35, 36]
+            )
+            token_to_choice = {tid: ch for tid, ch in zip(ordered_ids, ["A", "B", "C", "D", "E"])}
+
             # Extract compact answer tokens instead of full sequences
-            answer_tokens = _extract_answer_tokens(labels)
+            answer_tokens = _extract_answer_tokens(labels, valid_answer_tokens=set(ordered_ids))
             if answer_tokens is not None:
                 rec["labels_answer_tokens"] = answer_tokens
                 # Also provide letter choices for convenience
-                token_to_choice = {32: "A", 33: "B", 34: "C", 35: "D", 36: "E"}
                 rec["labels_answer_choices"] = [
                     token_to_choice.get(token, "?" if token != -1 else "INVALID") for token in answer_tokens
                 ]
@@ -327,11 +339,12 @@ class EvalDumpRecordedCallback(TrainerCallback):
             print(f"EvalDumpRecordedCallback write failed: {e}")
 
 
-def _extract_answer_tokens(labels):
-    """Extract just the answer tokens (32-36) from labels_raw sequences.
+def _extract_answer_tokens(labels, valid_answer_tokens: set[int]):
+    """Extract just the answer tokens (A–E) from labels_raw sequences.
 
     For each sequence, finds the token 2 positions before the first -100,
-    which should be the answer token (A=32, B=33, C=34, D=35, E=36).
+    which should be the answer token. Valid answers are provided via
+    `valid_answer_tokens` (derived from the tokenizer).
 
     Args:
         labels: Raw label sequences from evaluation
@@ -345,7 +358,6 @@ def _extract_answer_tokens(labels):
             return None
 
         answer_tokens = []
-        valid_answer_tokens = {32, 33, 34, 35, 36}  # A, B, C, D, E
 
         for label_seq in labels_list:
             try:

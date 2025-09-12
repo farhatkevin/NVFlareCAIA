@@ -160,15 +160,12 @@ def main():
     if dist.is_initialized():
         dist.barrier()
 
-    # Dataset
-
-    # After loading your datasets, apply the formatting:
     # TODO: remove select after testing
     dataset_train = (
-        datasets.load_dataset("json", data_files=args.data_path_train, split="train").shuffle().select(range(2000))
+        datasets.load_dataset("json", data_files=args.data_path_train, split="train").shuffle().select(range(10000))
     )
     dataset_valid = (
-        datasets.load_dataset("json", data_files=args.data_path_valid, split="train").shuffle().select(range(50))
+        datasets.load_dataset("json", data_files=args.data_path_valid, split="train").shuffle().select(range(500))
     )
 
     # Model configs
@@ -197,40 +194,6 @@ def main():
 
     dataset_train = dataset_train.map(format_instruction, batched=True, remove_columns=dataset_train.column_names)
     dataset_valid = dataset_valid.map(format_instruction, batched=True, remove_columns=dataset_valid.column_names)
-
-    # print first sample for verification
-    if local_rank == 0 and len(dataset_train) > 0:
-        ex = dataset_train[0]
-        msgs = ex["messages"]
-
-        # Prompt-only: drop the assistant turn; add assistant header for generation
-        msgs_prompt = msgs[:-1]
-        rendered_prompt = tokenizer.apply_chat_template(
-            msgs_prompt,
-            tokenize=False,
-            add_generation_prompt=True,  # adds assistant header + "\n\n"
-        )
-
-        # Encode rendered prompt exactly as fed to the model
-        enc = tokenizer(
-            rendered_prompt,
-            add_special_tokens=False,  # template already contains special tokens
-            return_tensors=None,
-        )
-        ids = enc["input_ids"]
-        # Handle both list[int] and list[list[int]] returns
-        if isinstance(ids, list) and len(ids) > 0 and isinstance(ids[0], list):
-            ids = ids[0]
-
-        print("=== Prompt-only debug ===")
-        print("Rendered tail:", repr(rendered_prompt[-160:]))
-        print("Token count:", len(ids))
-        print("Token ids tail:", ids[-40:])
-        print("Decoded tail:", tokenizer.decode(ids[-40:]))
-
-        # Optional: confirm newline tokenization
-        nl2 = tokenizer.encode("\n\n", add_special_tokens=False)
-        print("newline '\\n\\n' token ids:", nl2)
 
     # Then apply filtering with debug info
     original_train_size = len(dataset_train)
@@ -367,7 +330,7 @@ def main():
             if os.path.isabs(args.eval_dump_file)
             else os.path.join(args.output_path, args.eval_dump_file)
         )
-        eval_dump_cb = EvalDumpRecordedCallback(out_path=dump_path, local_rank=local_rank)
+        eval_dump_cb = EvalDumpRecordedCallback(out_path=dump_path, local_rank=local_rank, tokenizer=tokenizer)
 
     ##########################################################
 
