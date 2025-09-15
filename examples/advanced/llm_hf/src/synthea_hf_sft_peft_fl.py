@@ -31,6 +31,8 @@ from training_utils import (
     EvalDumpRecordedCallback,
     compute_metrics,
     create_loss_logger,
+    state_dict_fingerprint,
+    model_fingerprint,
     filter_by_length_messages,
     format_instruction,
     preprocess_logits_for_metrics,
@@ -162,10 +164,10 @@ def main():
 
     # TODO: remove select after testing
     dataset_train = (
-        datasets.load_dataset("json", data_files=args.data_path_train, split="train").shuffle().select(range(10000))
+        datasets.load_dataset("json", data_files=args.data_path_train, split="train").shuffle().select(range(1000))
     )
     dataset_valid = (
-        datasets.load_dataset("json", data_files=args.data_path_valid, split="train").shuffle().select(range(500))
+        datasets.load_dataset("json", data_files=args.data_path_valid, split="train").shuffle().select(range(50))
     )
 
     # Model configs
@@ -382,6 +384,18 @@ def main():
             dist.barrier()
 
         # Load state dict
+        if local_rank == 0 and global_model is not None:
+            # Fingerprint the received global model before loading
+            fp_recv = state_dict_fingerprint(global_model, name_hint=f"global_r{curr_round}")
+            print(f"[Round {curr_round}] Received global model fp: {fp_recv}")
+            # Also show PEFT-only view of received global to compare apples-to-apples with loaded PEFT state
+            try:
+                peft_only_sd = {k: v for k, v in global_model.items() if "lora_" in k}
+                if len(peft_only_sd) > 0:
+                    fp_recv_peft = state_dict_fingerprint(peft_only_sd, name_hint=f"global_r{curr_round}_peft_only")
+                    print(f"[Round {curr_round}] Received global (PEFT-only) fp: {fp_recv_peft}")
+            except Exception as e:
+                print(f"[Round {curr_round}] PEFT-only fingerprint of received global failed: {e}")
         if train_mode:
             set_peft_model_state_dict(trainer.model, global_model)
         else:
@@ -389,6 +403,10 @@ def main():
         # Wait for main process to finish model loading
         if dist.is_initialized():
             dist.barrier()
+        if local_rank == 0:
+            # Fingerprint the model in memory after loading global weights
+            fp_loaded = model_fingerprint(trainer.model, peft_only=bool(train_mode))
+            print(f"[Round {curr_round}] Model after load fp: {fp_loaded}")
 
         # Update current round for logging, then evaluate the global model
         try:
@@ -448,6 +466,10 @@ def main():
         # Wait for all process to finish training before continuing
         if dist.is_initialized():
             dist.barrier()
+        if local_rank == 0:
+            # Fingerprint the locally trained model
+            fp_trained = model_fingerprint(trainer.model, peft_only=bool(train_mode))
+            print(f"[Round {curr_round}] Model after local training fp: {fp_trained}")
 
         # compose output model to send back to server (only on main process)
         if local_rank == 0:
@@ -470,6 +492,9 @@ def main():
 
             # print the dict size
             print(f"In total {len(out_param.keys())} params to be sent to server.")
+            # Fingerprint the outgoing params (what we send back)
+            fp_out = state_dict_fingerprint(out_param, name_hint=f"client_out_r{curr_round}")
+            print(f"[Round {curr_round}] Outgoing params fp: {fp_out}")
 
             # construct trained FL model
             output_model = flare.FLModel(

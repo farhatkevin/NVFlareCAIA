@@ -144,16 +144,18 @@ def main():
         # To customize timeouts, use BaseScriptRunner with a pre-configured executor. ScriptRunner does not accept an exector, but BaseScriptRunner does.
         # Note: BaseScriptRunner uses fixed component ids "pipe" and "launcher", which we match here.
         # This changes the timeouts properly, which we may need to modify depending on batch sizes, model size, etc.
+
         from nvflare.app_opt.pt.client_api_launcher_executor import PTClientAPILauncherExecutor
 
         executor = PTClientAPILauncherExecutor(
             pipe_id="pipe",
             launcher_id="launcher",
-            peer_read_timeout=300.0,
-            task_wait_timeout=None,
-            launch_timeout=None,
-            heartbeat_timeout=300.0,
-            last_result_transfer_timeout=900.0,
+            peer_read_timeout=500.0,
+            task_wait_timeout=500.0,
+            launch_timeout=500.0,
+            heartbeat_timeout=500.0,
+            last_result_transfer_timeout=1000.0,
+            server_expected_format=server_expected_format,
         )
 
         if len(gpus[i]) == 1:
@@ -183,8 +185,8 @@ def main():
         # TODO: this code is problematic, if i keep it i get AttributeError: 'dict' object has no attribute '__module__'. Did you mean: '__reduce__'?
         # if i remove the code, we can run, but the client timeout is not set and i keep hitting timeout errors (no quantization)
         # with quantization, no errors with timeout, training happens normaly
-        # client_params = {"task_result_timeout": 300}
-        # job.to_clients(client_params)
+        # client_params = {"submit_task_result_timeout": 300}
+        # job.to(client_params, site_name)
 
     # Export the job
     print("job_dir=", job_dir)

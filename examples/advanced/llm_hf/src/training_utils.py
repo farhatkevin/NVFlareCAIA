@@ -2,6 +2,7 @@ import json
 import os
 import re
 from typing import Any, Callable, Dict, List
+import hashlib
 
 import numpy as np
 import torch
@@ -472,3 +473,97 @@ def create_loss_logger(site_name: str, output_path: str, loss_log_file: str | No
     else:
         log_file = os.path.join(output_path, f"loss_{site_name}.log")
     return LossFileLogger(log_file=log_file, site_name=site_name, local_rank=local_rank)
+
+
+# ------------------------------
+# Model/weights fingerprinting
+# ------------------------------
+
+def _tensor_sample_bytes(t: torch.Tensor, max_elems: int = 4096) -> bytes:
+    """Return a stable byte sample from a tensor for hashing.
+
+    - Moves to CPU, casts to float32 for dtype invariance.
+    - Flattens and takes the first `max_elems` values (or all if smaller).
+    - Returns raw bytes for hashing.
+    """
+    if not torch.is_tensor(t):
+        return b""
+    with torch.no_grad():
+        flat = t.detach().to(dtype=torch.float32, device="cpu").view(-1)
+        n = min(max_elems, flat.numel())
+        if n == 0:
+            return b""
+        return flat[:n].numpy().tobytes()
+
+
+def state_dict_fingerprint(
+    sd: Dict[str, Any],
+    sample_per_tensor: int = 4096,
+    name_hint: str | None = None,
+    include_names_in_hash: bool = False,
+) -> Dict[str, Any]:
+    """Compute a lightweight fingerprint for a (name -> Tensor) dict.
+
+    Returns a dict with:
+      - name: optional tag
+      - sha256: first 16 hex chars of SHA256 over sampled bytes
+      - num_tensors: count of tensor entries
+      - num_elems: total number of elements across tensors
+      - sample_keys: a few representative keys (first/last)
+    """
+    h = hashlib.sha256()
+    num_tensors = 0
+    num_elems = 0
+    keys = sorted([k for k in sd.keys()])
+    for k in keys:
+        v = sd[k]
+        if not torch.is_tensor(v):
+            try:
+                import numpy as _np
+
+                if isinstance(v, _np.ndarray):
+                    v = torch.from_numpy(v)
+                else:
+                    continue
+            except Exception:
+                continue
+        num_tensors += 1
+        try:
+            num_elems += int(v.numel())
+        except Exception:
+            pass
+        if include_names_in_hash:
+            h.update(k.encode("utf-8"))
+        h.update(_tensor_sample_bytes(v, max_elems=sample_per_tensor))
+    sample_keys = keys[:2] + (keys[-2:] if len(keys) > 3 else [])
+    return {
+        "name": name_hint,
+        "sha256": h.hexdigest()[:16],
+        "num_tensors": num_tensors,
+        "num_elems": int(num_elems),
+        "sample_keys": sample_keys,
+    }
+
+
+def model_fingerprint(model: torch.nn.Module, peft_only: bool = False, sample_per_tensor: int = 4096) -> Dict[str, Any]:
+    """Fingerprint a model's weights.
+
+    - If `peft_only` is True and the model is a PEFT model, fingerprints only the PEFT adapter
+      parameters via `get_peft_model_state_dict`.
+    - Otherwise fingerprints the full `state_dict()`.
+    """
+    try:
+        from peft import get_peft_model_state_dict
+    except Exception:
+        get_peft_model_state_dict = None
+
+    if peft_only and get_peft_model_state_dict is not None:
+        try:
+            sd = get_peft_model_state_dict(model)
+            return state_dict_fingerprint(sd, sample_per_tensor=sample_per_tensor, name_hint="peft_state")
+        except Exception:
+            # Fallback to full model if PEFT access fails
+            pass
+
+    sd = model.state_dict()
+    return state_dict_fingerprint(sd, sample_per_tensor=sample_per_tensor, name_hint="full_state")
