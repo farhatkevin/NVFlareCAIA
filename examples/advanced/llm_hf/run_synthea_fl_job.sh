@@ -1,8 +1,8 @@
 #!/bin/bash
 
 python3 synthea_llm_hf_fl_job.py \
- --client_ids train_1 train_2 \
- --data_path ${PWD}/synthea_data \
+ --client_ids split_1 split_2 \
+ --data_path ${PWD}/new_synthea_data \
  --workspace_dir ${PWD}/workspace/hf_sft_multi \
  --job_dir ${PWD}/workspace/jobs/hf_sft_multi \
  --train_mode SFT \

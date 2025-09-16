@@ -451,15 +451,85 @@ class LossFileLogger(TrainerCallback):
     def on_log(self, args, state, control, logs=None, **kwargs):
         if not logs:
             return
-        # Write the raw dict exactly as received from HF Trainer
-        self._write(str(logs))
+        # Print just a simple site tag before the framework prints the dict
+        try:
+            print(f"[site={self.site_name}]")
+        except Exception:
+            pass
+        prefix = f"[site={self.site_name}][round={self.current_round}]"
+        self._write(f"{prefix} train: {logs}")
 
     # Called after evaluation with metrics
     def on_evaluate(self, args, state, control, metrics=None, **kwargs):
         if not metrics:
             return
-        # Write the raw dict exactly as received from HF Trainer
-        self._write(str(metrics))
+        # Print just a simple site tag before the framework prints the dict
+        try:
+            print(f"[site={self.site_name}]")
+        except Exception:
+            pass
+        prefix = f"[site={self.site_name}][round={self.current_round}]"
+        # Always write full metrics dict to file
+        self._write(f"{prefix} eval: {metrics}")
+
+
+class WandbMetricsLogger(TrainerCallback):
+    """Logs key metrics explicitly to Weights & Biases.
+
+    - Only logs on local_rank 0 to avoid duplication.
+    - Focuses on eval metrics like eval_accuracy/eval_loss that may not appear by default.
+    - Stores immutable metadata (site) in config/summary instead of logging as a metric.
+    """
+
+    def __init__(self, site_name: str, local_rank: int = 0):
+        self.site_name = site_name
+        self.local_rank = local_rank
+        self.current_round = 0
+
+    def set_round(self, r: int | None):
+        try:
+            self.current_round = int(r) if r is not None else 0
+        except Exception:
+            self.current_round = 0
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        # Save site info once as run metadata to avoid W&B media panel warnings
+        try:
+            import wandb  # type: ignore
+
+            if wandb.run is None:
+                return
+            wandb.config.update({"site": self.site_name}, allow_val_change=True)
+            wandb.run.summary["site"] = self.site_name
+        except Exception:
+            pass
+
+    def on_evaluate(self, args, state, control, metrics=None, **kwargs):
+        if self.local_rank != 0 or not isinstance(metrics, dict):
+            return
+        try:
+            import wandb  # type: ignore
+
+            if wandb.run is None:
+                return
+
+            log_items = {}
+            # Accuracy: log both grouped and flat keys
+            if "eval_accuracy" in metrics and metrics["eval_accuracy"] is not None:
+                log_items["eval/accuracy"] = metrics["eval_accuracy"]
+                log_items["eval_accuracy"] = metrics["eval_accuracy"]
+            # Loss: log both grouped and flat keys
+            if "eval_loss" in metrics and metrics["eval_loss"] is not None:
+                log_items["eval/loss"] = metrics["eval_loss"]
+                log_items["eval_loss"] = metrics["eval_loss"]
+            if not log_items:
+                return
+
+            # Add context (numeric only)
+            log_items["fl_round"] = self.current_round
+            wandb.log(log_items)
+        except Exception as e:
+            print(f"WandbMetricsLogger failed: {e}")
 
 
 def create_loss_logger(site_name: str, output_path: str, loss_log_file: str | None, local_rank: int) -> LossFileLogger:

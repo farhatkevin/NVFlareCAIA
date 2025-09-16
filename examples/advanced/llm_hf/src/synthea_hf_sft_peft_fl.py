@@ -31,6 +31,7 @@ from training_utils import (
     EvalDumpRecordedCallback,
     compute_metrics,
     create_loss_logger,
+    WandbMetricsLogger,
     state_dict_fingerprint,
     model_fingerprint,
     filter_by_length_messages,
@@ -45,12 +46,10 @@ import nvflare.client as flare
 
 MAX_SEQ_LENGTH = 4096
 
-
 # Add callback to stop at each epoch
 class StopCallback(TrainerCallback):
     def on_epoch_end(self, args, state, control, logs=None, **kwargs):
         control.should_training_stop = True
-
 
 # set deterministic seed for reproducibility
 torch.manual_seed(0)
@@ -164,10 +163,14 @@ def main():
 
     # TODO: remove select after testing
     dataset_train = (
-        datasets.load_dataset("json", data_files=args.data_path_train, split="train").shuffle().select(range(1000))
+        datasets.load_dataset("json", data_files=args.data_path_train, split="train").shuffle().select(range(10000))
+        # datasets.load_dataset("json", data_files=args.data_path_train, split="train").shuffle()
+
     )
     dataset_valid = (
         datasets.load_dataset("json", data_files=args.data_path_valid, split="train").shuffle().select(range(50))
+        # datasets.load_dataset("json", data_files=args.data_path_valid, split="train").shuffle()
+
     )
 
     # Model configs
@@ -309,6 +312,7 @@ def main():
         completion_only_loss=True,
         metric_for_best_model="eval_accuracy",
         max_length=MAX_SEQ_LENGTH,
+        report_to=["wandb"],
     )
 
     ##########################################################
@@ -320,6 +324,7 @@ def main():
     loss_logger = create_loss_logger(
         site_name=site_name, output_path=args.output_path, loss_log_file=args.loss_log_file, local_rank=local_rank
     )
+    wandb_cb = WandbMetricsLogger(site_name=site_name, local_rank=local_rank)
 
     # Prepare compute_metrics wrapper and optional eval dump recorder
     base_compute = partial(compute_metrics, tokenizer=tokenizer, verbose=True)
@@ -347,7 +352,8 @@ def main():
         preprocess_logits_for_metrics=lambda logits, labels: preprocess_logits_for_metrics(logits, labels, tokenizer),
         # preprocess_logits_for_metrics=preprocess_logits_for_metrics,
         args=train_args,
-        callbacks=[StopCallback(), loss_logger] + ([eval_dump_cb] if eval_dump_cb is not None else []),
+        callbacks=[StopCallback(), loss_logger, wandb_cb]
+        + ([eval_dump_cb] if eval_dump_cb is not None else []),
     )
 
     # Untouched from original
@@ -411,6 +417,7 @@ def main():
         # Update current round for logging, then evaluate the global model
         try:
             loss_logger.set_round(curr_round)
+            wandb_cb.set_round(curr_round)
         except Exception:
             pass
         # Evaluate the global model (reset debug so first eval batch prints A–E logits)
