@@ -1,6 +1,5 @@
 import json
 import os
-import re
 from typing import Any, Callable, Dict, List
 import hashlib
 
@@ -122,6 +121,154 @@ def compute_metrics(eval_preds: EvalPrediction, tokenizer, verbose=True) -> Dict
         print(f"Evaluated {len(valid_idx)} samples, accuracy: {accuracy:.3f}")
 
     return {"accuracy": accuracy}
+
+# def compute_loss(model_outputs, labels, num_items_in_batch):
+#     """Compute cross-entropy loss for multiple choice where answers are single letters A-E.
+
+#     Args:
+#         model_outputs: Model outputs containing logits of shape (batch_size, seq_len, vocab_size)
+#         labels: Ground truth labels of shape (batch_size, seq_len)
+#         num_items_in_batch: Number of items in the batch (batch_size)
+    
+#     Returns:
+#         Computed loss value
+#     """
+#     print(f"{model_outputs=}")
+#     print(f"{model_outputs.logits.shape=}")
+#     print(f"{labels=}")
+#     print(f"{num_items_in_batch=}")
+#     logits = model_outputs.logits #shpae is (batch_size, seq_len, vocab_size)
+#     vocab_size = logits.size(-1)
+#     logits = logits.view(-1, vocab_size)  # Shape: (batch_size * seq_len, vocab_size)
+#     labels = labels.view(-1)  # Shape: (batch_size * seq_len)
+#     loss = F.cross_entropy(logits, labels, ignore_index=-100, reduction='mean')
+#     # loss = loss / num_items_in_batch  # Average loss per item in the batch
+#     print(f"{loss=}")
+#     return loss
+
+import torch
+import torch.nn.functional as F
+
+
+# def compute_loss(model_outputs, labels, num_items_in_batch=None):
+#     """
+#     Compute loss only on the answer token:
+#     - answer = second-to-last non -100 label in each sequence
+#     - CE computed just on those positions
+#     """
+#     logits = model_outputs.logits  # (B, T, V)
+#     B, T, V = logits.shape
+
+#     # Find answer positions (second-to-last valid label)
+#     answer_positions = []
+#     target_labels = []
+#     for i in range(B):
+#         non_ignored = torch.nonzero(labels[i] != -100, as_tuple=True)[0]
+#         if non_ignored.numel() >= 2:
+#             pos = non_ignored[-2].item()
+#             answer_positions.append(pos)
+#             target_labels.append(labels[i, pos].item())
+#             print(f"[sample {i}] answer position: {pos}, label: {labels[i, pos].item()}")
+#             print(f"labels: {target_labels}")
+#         else:
+#             # no valid answer found
+#             answer_positions.append(None)
+#             target_labels.append(-100)
+
+#     # Gather logits at those positions
+#     answer_logits = []
+#     for i, pos in enumerate(answer_positions):
+#         if pos is not None:
+#             answer_logits.append(logits[i, pos])  # shape (V,)
+#     if len(answer_logits) == 0:
+#         return torch.tensor(0.0, device=logits.device, requires_grad=True)
+
+#     answer_logits = torch.stack(answer_logits, dim=0)  # (B, V)
+#     target_labels = torch.tensor(target_labels, device=logits.device)
+
+#     # Cross entropy over just those rows
+#     loss_sum = F.cross_entropy(answer_logits, target_labels, reduction="sum")
+
+#     # Denom = batch size (1 answer per sample) or provided
+#     denom = num_items_in_batch if num_items_in_batch is not None else len(answer_logits)
+#     loss = loss_sum / denom
+
+#     print(f"[compute_loss] answer_positions={answer_positions}, "
+#           f"target_labels={target_labels.tolist()}, loss={loss.item():.6f}")
+
+#     return loss
+
+import torch
+import torch.nn.functional as F
+
+def compute_loss_mcq5(model_outputs, labels, num_items_in_batch=None, tokenizer=None):
+    """
+    Compute multiple-choice loss (A–E) using 5-class CE:
+      - Each sequence has exactly one supervised answer token
+      - We slice logits to only the 5 choice IDs
+      - Target label is mapped to class index 0..4
+    """
+    logits = model_outputs.logits  # (B, T, V)
+    B, T, V = logits.shape
+
+    # Get the 5 choice token IDs
+    choice_ids = torch.tensor(
+        get_answer_token_ids(tokenizer, ("A","B","C","D","E")),
+        device=logits.device,
+        dtype=torch.long
+    )
+    id2cls = {int(tid): i for i, tid in enumerate(choice_ids.tolist())}
+
+    # Collect per-sample answer positions and target classes
+    target_classes = []
+    pos_idx = []
+    for i in range(B):
+        non_ignored = torch.nonzero(labels[i] != -100, as_tuple=True)[0]
+        if non_ignored.numel() >= 2:
+            ans_pos = non_ignored[-2].item()
+            ans_id = int(labels[i, ans_pos].item())
+            if ans_id not in id2cls:
+                raise ValueError(f"Label id {ans_id} not in choice IDs {choice_ids.tolist()}")
+            target_classes.append(id2cls[ans_id])
+            pos_idx.append(ans_pos)
+            print(f"[sample {i}] answer_pos={ans_pos}, token_id={ans_id}, class={id2cls[ans_id]}")
+        else:
+            target_classes.append(-100)
+            pos_idx.append(None)
+
+    target_classes = torch.tensor(target_classes, device=logits.device, dtype=torch.long)
+
+    # Gather logits at answer positions
+    # shape: (B, V)
+    answer_logits = []
+    for i, pos in enumerate(pos_idx):
+        if pos is not None:
+            answer_logits.append(logits[i, pos])
+    if len(answer_logits) == 0:
+        return torch.tensor(0.0, device=logits.device, requires_grad=True)
+    answer_logits = torch.stack(answer_logits, dim=0)  # (B, V)
+
+    # Slice to the 5 choices: (B, 5)
+    logits_5 = answer_logits[:, choice_ids]
+
+    probs = F.softmax(logits_5, dim=-1)
+    pred_classes = probs.argmax(dim=-1)
+
+    for i in range(probs.size(0)):
+        p = probs[i].detach().cpu().numpy().round(6).tolist()
+        print(f"[sample {i}] probs={p}, target={target_classes[i].item()}, pred={pred_classes[i].item()}")
+
+    # Cross-entropy loss
+    loss_sum = F.cross_entropy(logits_5, target_classes, reduction="sum")
+
+    # Denom = trainer’s count or batch size
+    denom = num_items_in_batch if num_items_in_batch is not None else len(answer_logits)
+    loss = loss_sum / denom
+
+    print(f"[compute_loss_mcq5] target_classes={target_classes.tolist()}, loss={loss.item():.10f}")
+    return loss
+
+
 
 
 def format_instruction(example):

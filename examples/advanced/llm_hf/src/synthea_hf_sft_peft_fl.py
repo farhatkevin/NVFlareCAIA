@@ -28,18 +28,24 @@ import torch.distributed as dist
 from accelerate import PartialState
 from peft import LoraConfig, get_peft_model, get_peft_model_state_dict, set_peft_model_state_dict, utils
 from training_utils import (
-    EvalDumpRecordedCallback,
     compute_metrics,
+    preprocess_logits_for_metrics,
+    compute_loss_mcq5,
     create_loss_logger,
-    WandbMetricsLogger,
     state_dict_fingerprint,
     model_fingerprint,
     filter_by_length_messages,
     format_instruction,
-    preprocess_logits_for_metrics,
     wrap_compute_metrics,
+    WandbMetricsLogger,
+    EvalDumpRecordedCallback,
 )
+
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback, trainer_utils
+import transformers 
+print(f"Transformers version: {transformers.__version__}")
+
+
 from trl import SFTConfig, SFTTrainer
 
 import nvflare.client as flare
@@ -348,6 +354,8 @@ def main():
         peft_config=peft_config,
         processing_class=tokenizer,
         compute_metrics=compute_fn,
+        # compute_loss_func=compute_loss_mcq5,
+        compute_loss_func=lambda outputs, labels, num_items_in_batch=None: compute_loss_mcq5(outputs, labels, num_items_in_batch, tokenizer=tokenizer),
         # need to pass in tokenizer to get encoded A–E labels, so using lambda function
         preprocess_logits_for_metrics=lambda logits, labels: preprocess_logits_for_metrics(logits, labels, tokenizer),
         # preprocess_logits_for_metrics=preprocess_logits_for_metrics,
