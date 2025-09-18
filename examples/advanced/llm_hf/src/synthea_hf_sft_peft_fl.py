@@ -87,6 +87,11 @@ def cleanup_distributed_training():
 
 
 def main():
+
+    # initializes NVFlare client API
+    flare.init()
+
+
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--model_name_or_path",
@@ -366,8 +371,7 @@ def main():
 
     # Untouched from original
 
-    # initializes NVFlare client API
-    flare.init()
+
 
     # Train federated rounds
     # start with global model at the beginning of each round
