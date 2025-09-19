@@ -15,6 +15,7 @@
 import argparse
 import copy
 import os
+import wandb
 
 # Add deterministic seed for reproducibility illustration
 import random
@@ -56,12 +57,6 @@ MAX_SEQ_LENGTH = 4096
 class StopCallback(TrainerCallback):
     def on_epoch_end(self, args, state, control, logs=None, **kwargs):
         control.should_training_stop = True
-
-# set deterministic seed for reproducibility
-torch.manual_seed(0)
-random.seed(0)
-np.random.seed(0)
-
 
 def setup_distributed_training():
     """Setup distributed training environment."""
@@ -151,7 +146,25 @@ def main():
         default=None,
         help="Optional JSONL file to append full eval generations each eval",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="Global random seed for torch/np/python/transformers",
+    )
+    # Single seed is used for both global and data randomness
     args = parser.parse_args()
+
+    # Single seed used everywhere
+
+    # Set seeds early so dataset shuffles use them
+    try:
+        trainer_utils.set_seed(args.seed)
+    except Exception:
+        torch.manual_seed(args.seed)
+        np.random.seed(args.seed)
+        random.seed(args.seed)
+
 
     # Setup distributed training
     rank, world_size, local_rank = setup_distributed_training()
@@ -174,14 +187,10 @@ def main():
 
     # TODO: remove select after testing
     dataset_train = (
-        datasets.load_dataset("json", data_files=args.data_path_train, split="train").shuffle().select(range(10000))
-        # datasets.load_dataset("json", data_files=args.data_path_train, split="train").shuffle()
-
+        datasets.load_dataset("json", data_files=args.data_path_train, split="train").shuffle(seed=args.seed)
     )
     dataset_valid = (
-        datasets.load_dataset("json", data_files=args.data_path_valid, split="train").shuffle().select(range(50))
-        # datasets.load_dataset("json", data_files=args.data_path_valid, split="train").shuffle()
-
+        datasets.load_dataset("json", data_files=args.data_path_valid, split="train").shuffle(seed=args.seed).select(range(200))
     )
 
     # Model configs
@@ -244,7 +253,7 @@ def main():
             print("WARNING: Training dataset is empty after filtering!")
 
     # record every 5% of the dataset
-    batch_size = 4
+    batch_size = 2
     gra_accu_steps = 10
     logging_steps = int(len(dataset_train) / (20 * batch_size * gra_accu_steps))
     if local_rank == 0:
@@ -290,14 +299,14 @@ def main():
         # Using callback, stop at each epoch, so specify num_train_epochs
         # the same as the total epoch in one-call training
         num_train_epochs=args.local_epoch * args.num_rounds,
-        per_device_train_batch_size=2,
+        per_device_train_batch_size=batch_size,
         gradient_accumulation_steps=gra_accu_steps,
         gradient_checkpointing=False,
         gradient_checkpointing_kwargs={"use_reentrant": False},
         # optimizers using bitsandbytes like "paged_adamw_32bit" have an issue with
         # multi-gpu training, to be consistent, use regular optimizer
         optim="adamw_torch",
-        logging_steps=20,
+        logging_steps=5,
         save_strategy="epoch",
         learning_rate=5e-6,
         bf16=True,
@@ -312,10 +321,10 @@ def main():
         # disable for local checkpointing
         eval_strategy="steps",
         # eval_on_start=True,
-        eval_steps=50,
+        eval_steps=20,
         save_safetensors=False,
-        seed=0,
-        data_seed=0,
+        seed=args.seed,
+        data_seed=args.seed,
         # Multi-GPU specific settings
         ddp_find_unused_parameters=False,
         dataloader_pin_memory=False,
@@ -336,6 +345,35 @@ def main():
         site_name=site_name, output_path=args.output_path, loss_log_file=args.loss_log_file, local_rank=local_rank
     )
     wandb_cb = WandbMetricsLogger(site_name=site_name, local_rank=local_rank)
+    # Initialize a named Weights & Biases run (rank 0 only)
+    try:
+        if local_rank == 0:
+            import wandb  # type: ignore
+            # Derive a compact model tag from the HF repo id
+            model_tag = (args.model_name_or_path.split("/")[-1] if isinstance(args.model_name_or_path, str) else "model")
+            n_train = len(dataset_train)
+            run_name = (
+                f"{site_name}-{model_tag}-N{n_train}-"
+                f"bs{batch_size}-ga{gra_accu_steps}-ep{args.local_epoch}-"
+                f"lr{train_args.learning_rate}-sched{args.lr_scheduler}"
+            )
+            wandb.init(
+                project=os.environ.get("WANDB_PROJECT", "nvflare-llm"),
+                name=run_name,
+                config={
+                    "site": site_name,
+                    "model_name_or_path": args.model_name_or_path,
+                    "batch_size": batch_size,
+                    "grad_accum": gra_accu_steps,
+                    "epochs_per_round": args.local_epoch,
+                    "lr": train_args.learning_rate,
+                    "scheduler": args.lr_scheduler,
+                    "dataset_train_size": n_train,
+                },
+            )
+    except Exception as e:
+        print(f"wandb.init not available or failed: {e}")
+    wandb.init(project="nvflare-llm", name=f"{site_name}-gas{gra_accu_steps}-bs{batch_size}-ep{args.local_epoch}-lr{train_args.learning_rate}-sched{args.lr_scheduler}")
 
     # Prepare compute_metrics wrapper and optional eval dump recorder
     base_compute = partial(compute_metrics, tokenizer=tokenizer, verbose=True)
@@ -360,7 +398,7 @@ def main():
         processing_class=tokenizer,
         compute_metrics=compute_fn,
         # compute_loss_func=compute_loss_mcq5,
-        compute_loss_func=lambda outputs, labels, num_items_in_batch=None: compute_loss_mcq5(outputs, labels, num_items_in_batch, tokenizer=tokenizer),
+        compute_loss_func=lambda outputs, labels, num_items_in_batch=None: compute_loss_mcq5(outputs, labels, train_args.gradient_accumulation_steps, num_items_in_batch, tokenizer=tokenizer),
         # need to pass in tokenizer to get encoded A–E labels, so using lambda function
         preprocess_logits_for_metrics=lambda logits, labels: preprocess_logits_for_metrics(logits, labels, tokenizer),
         # preprocess_logits_for_metrics=preprocess_logits_for_metrics,
@@ -368,7 +406,10 @@ def main():
         callbacks=[StopCallback(), loss_logger, wandb_cb]
         + ([eval_dump_cb] if eval_dump_cb is not None else []),
     )
-
+    
+    # TODO: github https://github.com/huggingface/transformers/issues/40564
+    trainer.model_accepts_loss_kwargs = False
+    print(f"model_accepts_loss_kwargs set to: {trainer.model_accepts_loss_kwargs}")
     # Untouched from original
 
 

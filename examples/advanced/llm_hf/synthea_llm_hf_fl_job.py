@@ -58,6 +58,7 @@ def main():
     message_mode = args.message_mode
     loss_log_file = args.loss_log_file
     eval_dump_file = args.eval_dump_file
+    seed = args.seed
 
     # Create the FedJob
     if train_mode.lower() == "sft":
@@ -134,12 +135,17 @@ def main():
             script_args += f" --loss_log_file {loss_log_file}"
         if eval_dump_file:
             script_args += f" --eval_dump_file {eval_dump_file}"
+        if seed:
+            script_args += f" --seed {seed}"
+
         if message_mode == "tensor":
             server_expected_format = "pytorch"
         elif message_mode == "numpy":
             server_expected_format = "numpy"
         else:
             raise ValueError(f"Invalid message_mode: {message_mode}, only numpy and tensor are supported.")
+
+
 
         # To customize timeouts, use BaseScriptRunner with a pre-configured executor. ScriptRunner does not accept an exector, but BaseScriptRunner does.
         # Note: BaseScriptRunner uses fixed component ids "pipe" and "launcher", which we match here.
@@ -185,8 +191,8 @@ def main():
         # TODO: this code is problematic, if i keep it i get AttributeError: 'dict' object has no attribute '__module__'. Did you mean: '__reduce__'?
         # if i remove the code, we can run, but the client timeout is not set and i keep hitting timeout errors (no quantization)
         # with quantization, no errors with timeout, training happens normaly
-        # client_params = {"submit_task_result_timeout": 300}
-        # job.to(client_params, site_name)
+        client_params = {"submit_task_result_timeout": 300}
+        job.to(client_params, site_name)
 
     # Export the job
     print("job_dir=", job_dir)
@@ -281,6 +287,11 @@ def define_parser():
         "--eval_dump_file",
         type=str,
         help="Optional JSONL file to append full eval generations each eval (relative path placed under output_path)",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        help="random seed",
     )
     return parser.parse_args()
 
