@@ -24,7 +24,7 @@ class HFFileModelPersistor(PTFileModelPersistor):
         source_ckpt_file_full_name=None,
         filter_id=None,
         load_weights_only=False,
-        model_name_or_path="meta-llama/llama-3.2-1b",  # Specify your model type here
+        model_name_or_path="allenai/OLMo-2-0425-1B-Instruct",  # Specify your model type here
         allow_numpy_conversion=True,
     ):
         super().__init__(
@@ -51,6 +51,19 @@ class HFFileModelPersistor(PTFileModelPersistor):
         # Get model state dict from NVFlare persistence manager
         save_dict = self.persistence_manager.to_persistence_dict()
 
+        print(f"🔍 PERSISTENCE MANAGER DICT STRUCTURE:")
+        print(f"  📦 Top-level keys: {list(save_dict.keys()) if isinstance(save_dict, dict) else 'Not a dict'}")
+        if isinstance(save_dict, dict):
+            for key, value in save_dict.items():
+                if isinstance(value, dict):
+                    print(f"  📂 '{key}' contains {len(value)} items")
+                    if len(value) > 0:
+                        sample_key = next(iter(value.keys()))
+                        sample_val = value[sample_key]
+                        print(f"    🔍 Sample: '{sample_key}' -> {type(sample_val)} {getattr(sample_val, 'shape', 'no shape')}")
+                else:
+                    print(f"  📄 '{key}' -> {type(value)}")
+
         # Always save the NVFlare/PT snapshot
         torch.save(save_dict, save_path + ".pt")
         print(f"✅ SAVED PyTorch model to {save_path}.pt")
@@ -68,6 +81,13 @@ class HFFileModelPersistor(PTFileModelPersistor):
             k = k.replace("base_model.model.", "model.")
             k = k.replace("model.model.", "model.")
             k = k.replace("module.", "")
+
+            # Fix OLMo-specific lm_head key mismatch
+            # Aggregated: "model.lm_head.weight" -> HF expects: "lm_head.weight"
+            if k.startswith("model.lm_head"):
+                k = k.replace("model.lm_head", "lm_head")
+                print(f"  🔧 Key remapping: model.lm_head -> lm_head")
+
             return k
 
         def _as_tensor_state_dict(sd: dict) -> dict:
@@ -95,27 +115,90 @@ class HFFileModelPersistor(PTFileModelPersistor):
             # Prepare HF model
             hf_model = None
             try:
-                print(f"using autoconfig for saving model ")
+                print(f"🔧 Preparing HF model for saving...")
                 if isinstance(getattr(self, "model", None), PreTrainedModel):
+                    print("  ✅ Using existing PreTrainedModel")
                     hf_model = self.model
                 else:
+                    print(f"  🔧 Creating fresh model from config: {self.model_name_or_path}")
                     cfg = AutoConfig.from_pretrained(self.model_name_or_path, trust_remote_code=True)
                     hf_model = AutoModelForCausalLM.from_config(cfg)
+                    print("  ⚠️ WARNING: Created fresh model with random weights!")
             except Exception as e:
-                print(f"  ⚠️ Could not initialize HF model from config: {e}")
+                print(f"  ❌ Could not initialize HF model from config: {e}")
 
             if hf_model is not None:
-                # Load aggregated weight s into the model (tolerate missing/unexpected)
-                missing, unexpected = hf_model.load_state_dict(tensor_sd, strict=False)
+                # Debug: Print tensor_sd keys for analysis
+                print(f"  🔍 tensor_sd has {len(tensor_sd)} keys")
+                print(f"  🔍 First 5 tensor_sd keys: {list(tensor_sd.keys())[:5]}")
+                print(f"  🔍 HF model has {len(dict(hf_model.named_parameters()))} parameters")
+                print(f"  🔍 First 5 HF model keys: {list(dict(hf_model.named_parameters()).keys())[:5]}")
+
+                # Fingerprint BEFORE loading aggregated weights (fresh random model)
+                def _tensor_fingerprint(tensor):
+                    if hasattr(tensor, 'data'):
+                        tensor = tensor.data
+                    return f"{tensor.mean().item():.6f}±{tensor.std().item():.6f}"
+
+                fresh_embed_fp = _tensor_fingerprint(hf_model.model.embed_tokens.weight)
+                fresh_lm_head_fp = _tensor_fingerprint(hf_model.lm_head.weight) if hasattr(hf_model, 'lm_head') else "N/A"
+                print(f"  🎲 BEFORE aggregated load - embed_tokens: {fresh_embed_fp}, lm_head: {fresh_lm_head_fp}")
+
+                # Load aggregated weights into the model - STRICT MODE for debugging
+                try:
+                    missing, unexpected = hf_model.load_state_dict(tensor_sd, strict=True)
+                    print(f"  ✅ Successfully loaded state_dict with strict=True")
+                except Exception as strict_error:
+                    print(f"  ❌ STRICT LOAD FAILED: {strict_error}")
+                    print("  🔧 Falling back to strict=False...")
+                    missing, unexpected = hf_model.load_state_dict(tensor_sd, strict=False)
+                    print(f"  ⚠️ Missing keys ({len(missing)}): {missing[:10]}...")  # Show first 10
+                    print(f"  ⚠️ Unexpected keys ({len(unexpected)}): {unexpected[:10]}...")  # Show first 10
+
+                    if len(missing) > len(tensor_sd) * 0.5:  # If >50% keys missing
+                        print("  🚨 CRITICAL: Most model weights not loaded! This will cause random performance.")
+                    elif len(missing) > 0:
+                        print(f"  ⚠️ WARNING: {len(missing)} parameters not loaded from aggregated weights")
+
+                # Fingerprint AFTER loading aggregated weights
+                loaded_embed_fp = _tensor_fingerprint(hf_model.model.embed_tokens.weight)
+                loaded_lm_head_fp = _tensor_fingerprint(hf_model.lm_head.weight) if hasattr(hf_model, 'lm_head') else "N/A"
+                print(f"  🎯 AFTER aggregated load - embed_tokens: {loaded_embed_fp}, lm_head: {loaded_lm_head_fp}")
+
+                # Check if weights actually changed (more definitive test)
+                embed_changed = fresh_embed_fp != loaded_embed_fp
+                lm_head_changed = (fresh_lm_head_fp != "N/A" and fresh_lm_head_fp != loaded_lm_head_fp)
+
+                # Also check actual tensor values for a few elements
+                embed_tensor_changed = not torch.allclose(
+                    hf_model.model.embed_tokens.weight[:5, :5],
+                    tensor_sd.get('model.embed_tokens.weight', torch.zeros(1,1))[:5, :5],
+                    atol=1e-6
+                )
+
+                print(f"  🔍 Embed fingerprint changed: {embed_changed}")
+                print(f"  🔍 Embed tensor values match aggregated: {not embed_tensor_changed}")
+
+                if not embed_changed:
+                    print("  🚨 CRITICAL: embed_tokens weights UNCHANGED - aggregation not working!")
+                else:
+                    print("  ✅ embed_tokens weights successfully updated")
+
+                if fresh_lm_head_fp != "N/A":
+                    print(f"  🔍 LM head fingerprint changed: {lm_head_changed}")
+                    if not lm_head_changed:
+                        print("  🚨 CRITICAL: lm_head weights UNCHANGED - aggregation not working!")
+                    else:
+                        print("  ✅ lm_head weights successfully updated")
+
                 if hasattr(hf_model, "tie_weights"):
                     try:
-                        print("tie weights")
+                        print("  🔗 Tying weights...")
                         hf_model.tie_weights()
-                    except Exception:
-                        print("  ⚠️ Could not tie weights")
-                        pass
+                    except Exception as tie_error:
+                        print(f"  ⚠️ Could not tie weights: {tie_error}")
                 else:
-                    print("no tie weights method found")
+                    print("  ℹ️ No tie_weights method found")
 
                 # Save HF folder, using safe serialization (safetensors) and large shard to avoid splits
                 hf_model.save_pretrained(hf_save_path, safe_serialization=True, max_shard_size="10GB")
