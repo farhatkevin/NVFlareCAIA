@@ -40,10 +40,14 @@ def main():
     print(f"Clients: {client_ids}, GPUs: {gpus}, ports: {ports}")
     # make sure the number of GPUs matches the number of clients
     if len(gpus) != num_clients:
-        raise ValueError(f"Number of GPUs ({len(gpus)}) does not match number of clients ({num_clients}).")
+        raise ValueError(
+            f"Number of GPUs ({len(gpus)}) does not match number of clients ({num_clients})."
+        )
     # make sure the number of ports equal or greater than the number of clients
     if len(ports) < num_clients:
-        raise ValueError(f"Number of ports ({len(ports)}) is less than number of clients ({num_clients}).")
+        raise ValueError(
+            f"Number of ports ({len(ports)}) is less than number of clients ({num_clients})."
+        )
 
     if args.threads:
         num_threads = args.threads
@@ -68,7 +72,9 @@ def main():
         job = FedJob(name="llm_hf_peft", min_clients=num_clients)
         output_path = "peft"
     else:
-        raise ValueError(f"Invalid train_mode: {train_mode}, only SFT and PEFT are supported.")
+        raise ValueError(
+            f"Invalid train_mode: {train_mode}, only SFT and PEFT are supported."
+        )
 
     # Define the FedAvg controller workflow and send to server
     controller = FedAvg(
@@ -82,19 +88,27 @@ def main():
         quantizer = ModelQuantizer(quantization_type=args.quantize_mode)
         dequantizer = ModelDequantizer()
         job.to(quantizer, "server", tasks=["train"], filter_type=FilterType.TASK_DATA)
-        job.to(dequantizer, "server", tasks=["train"], filter_type=FilterType.TASK_RESULT)
+        job.to(
+            dequantizer, "server", tasks=["train"], filter_type=FilterType.TASK_RESULT
+        )
 
     # Define the model persistor and send to server
     if train_mode.lower() == "sft":
         # First send the model to the server
         job.to("src/hf_sft_model.py", "server")
         # Then send the model persistor to the server
-        model_args = {"path": "src.hf_sft_model.CausalLMModel", "args": {"model_name_or_path": model_name_or_path}}
+        model_args = {
+            "path": "src.hf_sft_model.CausalLMModel",
+            "args": {"model_name_or_path": model_name_or_path},
+        }
     elif train_mode.lower() == "peft":
         # First send the model to the server
         job.to("src/hf_peft_model.py", "server")
         # Then send the model persistor to the server
-        model_args = {"path": "src.hf_peft_model.CausalLMPEFTModel", "args": {"model_name_or_path": model_name_or_path}}
+        model_args = {
+            "path": "src.hf_peft_model.CausalLMPEFTModel",
+            "args": {"model_name_or_path": model_name_or_path},
+        }
 
     # change to using HFFileModelPersistor
     # job.to(PTFileModelPersistor(model=model_args, allow_numpy_conversion=False), "server", id="persistor")
@@ -112,7 +126,11 @@ def main():
     )
 
     # Add model selection widget and send to server
-    job.to(IntimeModelSelector(key_metric="eval_accuracy", negate_key_metric=False), "server", id="model_selector")
+    job.to(
+        IntimeModelSelector(key_metric="eval_accuracy", negate_key_metric=False),
+        "server",
+        id="model_selector",
+    )
 
     # Send ScriptRunner to all clients
     for i in range(num_clients):
@@ -143,15 +161,17 @@ def main():
         elif message_mode == "numpy":
             server_expected_format = "numpy"
         else:
-            raise ValueError(f"Invalid message_mode: {message_mode}, only numpy and tensor are supported.")
-
-
+            raise ValueError(
+                f"Invalid message_mode: {message_mode}, only numpy and tensor are supported."
+            )
 
         # To customize timeouts, use BaseScriptRunner with a pre-configured executor. ScriptRunner does not accept an exector, but BaseScriptRunner does.
         # Note: BaseScriptRunner uses fixed component ids "pipe" and "launcher", which we match here.
         # This changes the timeouts properly, which we may need to modify depending on batch sizes, model size, etc.
 
-        from nvflare.app_opt.pt.client_api_launcher_executor import PTClientAPILauncherExecutor
+        from nvflare.app_opt.pt.client_api_launcher_executor import (
+            PTClientAPILauncherExecutor,
+        )
 
         executor = PTClientAPILauncherExecutor(
             pipe_id="pipe",
@@ -184,11 +204,21 @@ def main():
         job.to(runner, site_name, tasks=["train"])
 
         if args.quantize_mode:
-            job.to(quantizer, site_name, tasks=["train"], filter_type=FilterType.TASK_RESULT)
-            job.to(dequantizer, site_name, tasks=["train"], filter_type=FilterType.TASK_DATA)
+            job.to(
+                quantizer,
+                site_name,
+                tasks=["train"],
+                filter_type=FilterType.TASK_RESULT,
+            )
+            job.to(
+                dequantizer,
+                site_name,
+                tasks=["train"],
+                filter_type=FilterType.TASK_DATA,
+            )
 
         # Add additional parameters to clients
-        #TODO: can add this if using nvflare 2.7rc, but with 2.6 will fail with AttributeError: 'dict' object has no attribute '__module__'. Did you mean: '__reduce__'?
+        # TODO: can add this if using nvflare 2.7rc, but with 2.6 will fail with AttributeError: 'dict' object has no attribute '__module__'. Did you mean: '__reduce__'?
         # client_params = {"submit_task_result_timeout": 300}
         # job.to(client_params, site_name)
 

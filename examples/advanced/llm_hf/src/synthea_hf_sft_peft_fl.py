@@ -15,7 +15,6 @@
 import argparse
 import copy
 import os
-import wandb
 
 # Add deterministic seed for reproducibility illustration
 import random
@@ -26,24 +25,37 @@ import datasets
 import numpy as np
 import torch
 import torch.distributed as dist
+import transformers
+import wandb
 from accelerate import PartialState
-from peft import LoraConfig, get_peft_model, get_peft_model_state_dict, set_peft_model_state_dict, utils
+from peft import (
+    LoraConfig,
+    get_peft_model,
+    get_peft_model_state_dict,
+    set_peft_model_state_dict,
+    utils,
+)
 from training_utils import (
-    compute_metrics,
-    preprocess_logits_for_metrics,
+    EvalDumpRecordedCallback,
+    TrainSubsetEvalCallback,
+    WandbMetricsLogger,
     compute_loss_mcq5,
+    compute_metrics,
     create_loss_logger,
-    state_dict_fingerprint,
-    model_fingerprint,
     filter_by_length_messages,
     format_instruction,
+    model_fingerprint,
+    preprocess_logits_for_metrics,
+    state_dict_fingerprint,
     wrap_compute_metrics,
-    WandbMetricsLogger,
-    EvalDumpRecordedCallback,
+)
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    TrainerCallback,
+    trainer_utils,
 )
 
-from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback, trainer_utils
-import transformers 
 print(f"Transformers version: {transformers.__version__}")
 
 
@@ -53,10 +65,12 @@ import nvflare.client as flare
 
 MAX_SEQ_LENGTH = 4096
 
+
 # Add callback to stop at each epoch
 class StopCallback(TrainerCallback):
     def on_epoch_end(self, args, state, control, logs=None, **kwargs):
         control.should_training_stop = True
+
 
 def setup_distributed_training():
     """Setup distributed training environment."""
@@ -82,10 +96,8 @@ def cleanup_distributed_training():
 
 
 def main():
-
     # initializes NVFlare client API
     flare.init()
-
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -165,7 +177,6 @@ def main():
         np.random.seed(args.seed)
         random.seed(args.seed)
 
-
     # Setup distributed training
     rank, world_size, local_rank = setup_distributed_training()
 
@@ -187,11 +198,15 @@ def main():
 
     # TODO: remove select after testing
     dataset_train = (
+        # datasets.load_dataset("json", data_files=args.data_path_train, split="train").shuffle(seed=args.seed)
         datasets.load_dataset("json", data_files=args.data_path_train, split="train").shuffle(seed=args.seed)
     )
     dataset_valid = (
-        datasets.load_dataset("json", data_files=args.data_path_valid, split="train").shuffle(seed=args.seed).select(range(200))
+        datasets.load_dataset("json", data_files=args.data_path_valid, split="train")
+        .shuffle(seed=args.seed)
+        .select(range(200))
     )
+    # datasets.load_dataset("json", data_files=args.data_path_valid, split="train").shuffle(seed=args.seed).select(range(200))
 
     # Model configs
     model_name_or_path = args.model_name_or_path
@@ -321,7 +336,7 @@ def main():
         # disable for local checkpointing
         eval_strategy="steps",
         # eval_on_start=True,
-        eval_steps=20,
+        eval_steps=10,
         save_safetensors=False,
         seed=args.seed,
         data_seed=args.seed,
@@ -329,7 +344,7 @@ def main():
         ddp_find_unused_parameters=False,
         dataloader_pin_memory=False,
         # Prompt Completion w/ Mitchell
-        completion_only_loss=True,
+        # completion_only_loss=True,
         metric_for_best_model="eval_accuracy",
         max_length=MAX_SEQ_LENGTH,
         report_to=["wandb"],
@@ -342,15 +357,19 @@ def main():
     # Set up per-site loss logger (rank 0 only writes)
     site_name = args.site_name
     loss_logger = create_loss_logger(
-        site_name=site_name, output_path=args.output_path, loss_log_file=args.loss_log_file, local_rank=local_rank
+        site_name=site_name,
+        output_path=args.output_path,
+        loss_log_file=args.loss_log_file,
+        local_rank=local_rank,
     )
     wandb_cb = WandbMetricsLogger(site_name=site_name, local_rank=local_rank)
     # Initialize a named Weights & Biases run (rank 0 only)
     try:
         if local_rank == 0:
             import wandb  # type: ignore
+
             # Derive a compact model tag from the HF repo id
-            model_tag = (args.model_name_or_path.split("/")[-1] if isinstance(args.model_name_or_path, str) else "model")
+            model_tag = args.model_name_or_path.split("/")[-1] if isinstance(args.model_name_or_path, str) else "model"
             n_train = len(dataset_train)
             run_name = (
                 f"{site_name}-{model_tag}-N{n_train}-"
@@ -373,7 +392,6 @@ def main():
             )
     except Exception as e:
         print(f"wandb.init not available or failed: {e}")
-    wandb.init(project="nvflare-llm", name=f"{site_name}-gas{gra_accu_steps}-bs{batch_size}-ep{args.local_epoch}-lr{train_args.learning_rate}-sched{args.lr_scheduler}")
 
     # Prepare compute_metrics wrapper and optional eval dump recorder
     base_compute = partial(compute_metrics, tokenizer=tokenizer, verbose=True)
@@ -398,21 +416,29 @@ def main():
         processing_class=tokenizer,
         compute_metrics=compute_fn,
         # compute_loss_func=compute_loss_mcq5,
-        compute_loss_func=lambda outputs, labels, num_items_in_batch=None: compute_loss_mcq5(outputs, labels, train_args.gradient_accumulation_steps, num_items_in_batch, tokenizer=tokenizer),
+        # compute_loss_func=lambda outputs, labels, num_items_in_batch=None: compute_loss_mcq5(outputs, labels, train_args.gradient_accumulation_steps, num_items_in_batch, tokenizer=tokenizer),
         # need to pass in tokenizer to get encoded A–E labels, so using lambda function
         preprocess_logits_for_metrics=lambda logits, labels: preprocess_logits_for_metrics(logits, labels, tokenizer),
         # preprocess_logits_for_metrics=preprocess_logits_for_metrics,
         args=train_args,
-        callbacks=[StopCallback(), loss_logger, wandb_cb]
-        + ([eval_dump_cb] if eval_dump_cb is not None else []),
+        callbacks=[StopCallback(), loss_logger, wandb_cb] + ([eval_dump_cb] if eval_dump_cb is not None else []),
     )
-    
+
+    # Evaluate a small subset of the training set at epoch end to log train accuracy/loss
+    try:
+        sample_size = min(256, len(dataset_train)) if hasattr(dataset_train, "__len__") else 256
+    except Exception:
+        sample_size = 256
+    train_subset_cb = TrainSubsetEvalCallback(
+        train_dataset=dataset_train, sample_size=sample_size, local_rank=local_rank
+    )
+    train_subset_cb.bind_trainer(trainer)
+    trainer.add_callback(train_subset_cb)
+
     # TODO: github https://github.com/huggingface/transformers/issues/40564
     trainer.model_accepts_loss_kwargs = False
     print(f"model_accepts_loss_kwargs set to: {trainer.model_accepts_loss_kwargs}")
     # Untouched from original
-
-
 
     # Train federated rounds
     # start with global model at the beginning of each round
@@ -510,7 +536,9 @@ def main():
                     # SFT model can be large, save via HF API
                     # Disable safetensor for now
                     trainer.model.save_pretrained(
-                        resume_from_checkpoint_folder, state_dict=global_model, safe_serialization=False
+                        resume_from_checkpoint_folder,
+                        state_dict=global_model,
+                        safe_serialization=False,
                     )
 
             # Wait for main process to finish saving before continuing

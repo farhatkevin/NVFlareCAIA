@@ -4,7 +4,12 @@ import traceback
 
 import numpy as np
 import torch
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, PreTrainedModel
+from transformers import (
+    AutoConfig,
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    PreTrainedModel,
+)
 
 from nvflare.apis.event_type import EventType
 from nvflare.apis.fl_context import FLContext
@@ -60,7 +65,9 @@ class HFFileModelPersistor(PTFileModelPersistor):
                     if len(value) > 0:
                         sample_key = next(iter(value.keys()))
                         sample_val = value[sample_key]
-                        print(f"    🔍 Sample: '{sample_key}' -> {type(sample_val)} {getattr(sample_val, 'shape', 'no shape')}")
+                        print(
+                            f"    🔍 Sample: '{sample_key}' -> {type(sample_val)} {getattr(sample_val, 'shape', 'no shape')}"
+                        )
                 else:
                     print(f"  📄 '{key}' -> {type(value)}")
 
@@ -136,12 +143,14 @@ class HFFileModelPersistor(PTFileModelPersistor):
 
                 # Fingerprint BEFORE loading aggregated weights (fresh random model)
                 def _tensor_fingerprint(tensor):
-                    if hasattr(tensor, 'data'):
+                    if hasattr(tensor, "data"):
                         tensor = tensor.data
                     return f"{tensor.mean().item():.6f}±{tensor.std().item():.6f}"
 
                 fresh_embed_fp = _tensor_fingerprint(hf_model.model.embed_tokens.weight)
-                fresh_lm_head_fp = _tensor_fingerprint(hf_model.lm_head.weight) if hasattr(hf_model, 'lm_head') else "N/A"
+                fresh_lm_head_fp = (
+                    _tensor_fingerprint(hf_model.lm_head.weight) if hasattr(hf_model, "lm_head") else "N/A"
+                )
                 print(f"  🎲 BEFORE aggregated load - embed_tokens: {fresh_embed_fp}, lm_head: {fresh_lm_head_fp}")
 
                 # Load aggregated weights into the model - STRICT MODE for debugging
@@ -162,18 +171,20 @@ class HFFileModelPersistor(PTFileModelPersistor):
 
                 # Fingerprint AFTER loading aggregated weights
                 loaded_embed_fp = _tensor_fingerprint(hf_model.model.embed_tokens.weight)
-                loaded_lm_head_fp = _tensor_fingerprint(hf_model.lm_head.weight) if hasattr(hf_model, 'lm_head') else "N/A"
+                loaded_lm_head_fp = (
+                    _tensor_fingerprint(hf_model.lm_head.weight) if hasattr(hf_model, "lm_head") else "N/A"
+                )
                 print(f"  🎯 AFTER aggregated load - embed_tokens: {loaded_embed_fp}, lm_head: {loaded_lm_head_fp}")
 
                 # Check if weights actually changed (more definitive test)
                 embed_changed = fresh_embed_fp != loaded_embed_fp
-                lm_head_changed = (fresh_lm_head_fp != "N/A" and fresh_lm_head_fp != loaded_lm_head_fp)
+                lm_head_changed = fresh_lm_head_fp != "N/A" and fresh_lm_head_fp != loaded_lm_head_fp
 
                 # Also check actual tensor values for a few elements
                 embed_tensor_changed = not torch.allclose(
                     hf_model.model.embed_tokens.weight[:5, :5],
-                    tensor_sd.get('model.embed_tokens.weight', torch.zeros(1,1))[:5, :5],
-                    atol=1e-6
+                    tensor_sd.get("model.embed_tokens.weight", torch.zeros(1, 1))[:5, :5],
+                    atol=1e-6,
                 )
 
                 print(f"  🔍 Embed fingerprint changed: {embed_changed}")

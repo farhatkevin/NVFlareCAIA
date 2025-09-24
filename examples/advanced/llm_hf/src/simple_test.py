@@ -208,20 +208,23 @@ def main():
 
         pc = Counter(preds_list)
         tc = Counter(answers)
-        print("\nPrediction distribution:", {tokenizer.decode([k]): pc[k] for k in answer_ids})
+        print(
+            "\nPrediction distribution:",
+            {tokenizer.decode([k]): pc[k] for k in answer_ids},
+        )
         print("True distribution:", {tokenizer.decode([k]): tc[k] for k in answer_ids})
 
         # Show a few examples
         print("Samples (first 10):")
         for i in range(min(10, B)):
-            print(f"  {i}: pred={pred_letters[i]} true={true_letters[i]} {'✓' if preds_list[i]==answers[i] else '✗'}")
+            print(f"  {i}: pred={pred_letters[i]} true={true_letters[i]} {'✓' if preds_list[i] == answers[i] else '✗'}")
 
         print(f"Correct: {correct_count}/{B}")
         return correct_count == B
 
     large_ok = test_large_batch()
 
-    print(f"\n{'='*40}")
+    print(f"\n{'=' * 40}")
     print("RESULTS:")
     print(f"Single sample: {'✅' if single_ok else '❌'}")
     print(f"Batch test: {'✅' if batch_ok else '❌'}")

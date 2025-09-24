@@ -56,7 +56,11 @@ def get_restricted_token_probabilities(logits, tokenizer, choices=("A", "B", "C"
             max_prob = prob
             best_choice = choice
 
-    return {"probabilities": choice_probs, "best_choice": best_choice, "best_probability": max_prob}
+    return {
+        "probabilities": choice_probs,
+        "best_choice": best_choice,
+        "best_probability": max_prob,
+    }
 
 
 class ChatInference:
@@ -126,7 +130,11 @@ class ChatInference:
         self.system_prompt = system_prompt
         print(f"System prompt updated: {system_prompt[:100]}...")
 
-    def format_chat(self, user_message: str, conversation_history: Optional[List[Dict[str, str]]] = None) -> str:
+    def format_chat(
+        self,
+        user_message: str,
+        conversation_history: Optional[List[Dict[str, str]]] = None,
+    ) -> str:
         """
         Format a chat conversation using the model's chat template.
 
@@ -348,7 +356,10 @@ class ChatInference:
 
                 # Update conversation history
                 conversation_history.extend(
-                    [{"role": "user", "content": user_input}, {"role": "assistant", "content": response}]
+                    [
+                        {"role": "user", "content": user_input},
+                        {"role": "assistant", "content": response},
+                    ]
                 )
 
             except KeyboardInterrupt:
@@ -362,11 +373,17 @@ class ChatInference:
 def main():
     parser = argparse.ArgumentParser(description="Chat inference with configurable system prompt")
     parser.add_argument(
-        "--model_name_or_path", type=str, default="meta-llama/Llama-3.1-8B-Instruct", help="Model name or path"
+        "--model_name_or_path",
+        type=str,
+        default="meta-llama/Llama-3.1-8B-Instruct",
+        help="Model name or path",
     )
     parser.add_argument("--device", type=str, default="auto", help="Device to use (auto, cuda, cpu)")
     parser.add_argument(
-        "--torch_dtype", type=str, default="bfloat16", help="PyTorch data type (bfloat16, float16, float32)"
+        "--torch_dtype",
+        type=str,
+        default="bfloat16",
+        help="PyTorch data type (bfloat16, float16, float32)",
     )
     parser.add_argument("--system_prompt", type=str, help="Custom system prompt")
     parser.add_argument("--message", type=str, help="Single message to process (non-interactive mode)")
@@ -387,7 +404,10 @@ def main():
     if args.message:
         # Single message mode
         result = chat.generate_multiple_choice_response(
-            args.message, max_new_tokens=args.max_new_tokens, temperature=args.temperature, top_p=args.top_p
+            args.message,
+            max_new_tokens=args.max_new_tokens,
+            temperature=args.temperature,
+            top_p=args.top_p,
         )
         print(f"User: {args.message}")
         print(f"Most Likely Answer: {result['best_choice']} (probability: {result['best_probability']:.4f})")
@@ -412,7 +432,11 @@ def test_training_utils_functions():
     print("=== Testing training_utils functions in inference context ===")
 
     # Initialize chat inference
-    chat = ChatInference(model_name_or_path="meta-llama/Llama-3.1-8B-Instruct", device="auto", torch_dtype="bfloat16")
+    chat = ChatInference(
+        model_name_or_path="meta-llama/Llama-3.1-8B-Instruct",
+        device="auto",
+        torch_dtype="bfloat16",
+    )
 
     # Test with a few different medical questions
     test_questions = [
@@ -422,7 +446,7 @@ def test_training_utils_functions():
     ]
 
     for i, question in enumerate(test_questions):
-        print(f"\n--- Test Question {i+1} ---")
+        print(f"\n--- Test Question {i + 1} ---")
         print(f"Question: {question[:100]}...")
 
         # Format the input

@@ -34,7 +34,11 @@ def basic_inference(model_name: str, prompts: List[str], sampling_params: Sampli
         print("-" * 40)
 
 
-def chat_inference(model_name: str, messages_list: List[List[Dict[str, str]]], sampling_params: SamplingParams) -> None:
+def chat_inference(
+    model_name: str,
+    messages_list: List[List[Dict[str, str]]],
+    sampling_params: SamplingParams,
+) -> None:
     """Perform chat-based inference with proper chat template application."""
     print(f"Loading model and tokenizer: {model_name}")
     llm = LLM(model=model_name)
@@ -63,7 +67,9 @@ def chat_inference(model_name: str, messages_list: List[List[Dict[str, str]]], s
 
 
 def chat_interface_inference(
-    model_name: str, messages_list: List[List[Dict[str, str]]], sampling_params: SamplingParams
+    model_name: str,
+    messages_list: List[List[Dict[str, str]]],
+    sampling_params: SamplingParams,
 ) -> None:
     """Perform chat inference using vLLM's built-in chat interface."""
     print(f"Loading model: {model_name}")
@@ -93,12 +99,29 @@ def main():
         help="Model name or path (default: OLMo-2-1124-7B-Instruct)",
     )
     parser.add_argument(
-        "--mode", type=str, choices=["basic", "chat", "chat_interface"], default="basic", help="Inference mode"
+        "--mode",
+        type=str,
+        choices=["basic", "chat", "chat_interface"],
+        default="basic",
+        help="Inference mode",
     )
-    parser.add_argument("--temperature", type=float, default=0.8, help="Sampling temperature (default: 0.8)")
-    parser.add_argument("--top_p", type=float, default=0.95, help="Top-p sampling parameter (default: 0.95)")
     parser.add_argument(
-        "--max_tokens", type=int, default=100, help="Maximum number of tokens to generate (default: 100)"
+        "--temperature",
+        type=float,
+        default=0.8,
+        help="Sampling temperature (default: 0.8)",
+    )
+    parser.add_argument(
+        "--top_p",
+        type=float,
+        default=0.95,
+        help="Top-p sampling parameter (default: 0.95)",
+    )
+    parser.add_argument(
+        "--max_tokens",
+        type=int,
+        default=100,
+        help="Maximum number of tokens to generate (default: 100)",
     )
     parser.add_argument("--prompts_file", type=str, help="JSON file containing prompts or messages")
 

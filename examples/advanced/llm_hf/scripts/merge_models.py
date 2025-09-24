@@ -15,7 +15,6 @@ logger = logging.getLogger(__name__)
 
 
 class ModelMerger:
-
     def __init__(
         self,
         checkpoint_paths: List[Union[str, Path]],
@@ -174,7 +173,7 @@ class ModelMerger:
             merged_dict[key] = torch.zeros_like(state_dicts[0][key])
         for i, state_dict in enumerate(state_dicts):
             weight = weights[i] / weight_sum
-            logger.debug(f"Checkpoint {i+1} weight: {weight:.4f}")
+            logger.debug(f"Checkpoint {i + 1} weight: {weight:.4f}")
             for key in merged_dict.keys():
                 merged_dict[key] += weight * state_dict[key]
 
@@ -199,7 +198,7 @@ class ModelMerger:
 
         for i, state_dict in enumerate(state_dicts):
             weight = weights[i]
-            logger.debug(f"Checkpoint {i+1} weight: {weight:.4f}")
+            logger.debug(f"Checkpoint {i + 1} weight: {weight:.4f}")
             for key in merged_dict.keys():
                 merged_dict[key] += weight * state_dict[key]
 
@@ -223,9 +222,7 @@ class ModelMerger:
             logger.info(f"Output format forced to: {'safetensors' if use_safetensors else 'pytorch'}")
         else:
             use_safetensors = input_uses_safetensors
-            logger.info(
-                f"Using {'safetensors' if use_safetensors else 'pytorch'} format (auto-detected from input)"
-            )
+            logger.info(f"Using {'safetensors' if use_safetensors else 'pytorch'} format (auto-detected from input)")
 
         logger.info("Loading all state dictionaries...")
         state_dicts = []
@@ -247,23 +244,29 @@ class ModelMerger:
                 logger.warning(f"Unknown method '{method_name}', skipping. Available: {list(method_funcs.keys())}")
                 continue
 
-            logger.info(f"\n{'='*50}")
+            logger.info(f"\n{'=' * 50}")
             logger.info(f"Processing {method_name.upper()} merge")
-            logger.info(f"{'='*50}")
+            logger.info(f"{'=' * 50}")
 
             method_func = method_funcs[method_name]
             merged_dict = method_func(state_dicts)
 
             output_path = self.output_dir / f"merged_{method_name}"
-            self.save_state_dict(merged_dict, output_path, reference_checkpoint, method_name, use_safetensors)
+            self.save_state_dict(
+                merged_dict,
+                output_path,
+                reference_checkpoint,
+                method_name,
+                use_safetensors,
+            )
 
             total_params = sum(p.numel() for p in merged_dict.values())
             logger.info(f"Merged model has {total_params:,} parameters")
 
-        logger.info(f"\n{'='*50}")
+        logger.info(f"\n{'=' * 50}")
         logger.info("All merging methods completed successfully!")
         logger.info(f"Output directory: {self.output_dir}")
-        logger.info(f"{'='*50}")
+        logger.info(f"{'=' * 50}")
 
 
 def run_merge_job(
@@ -283,7 +286,6 @@ def run_merge_job(
     beaker_dry_run: bool = False,
     beaker_allow_dirty: bool = False,
 ):
-
     if use_beaker:
         return _run_merge_on_beaker(
             checkpoint_paths=checkpoint_paths,
@@ -320,7 +322,6 @@ def _run_merge_locally(
     format: str,
     verbose: bool,
 ):
-
     if verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
@@ -341,7 +342,10 @@ def _run_merge_locally(
     # else: auto-detect (force_safetensors = None)
 
     merger = ModelMerger(
-        checkpoint_paths=checkpoint_paths, output_dir=output_dir, alpha=alpha, force_safetensors=force_safetensors
+        checkpoint_paths=checkpoint_paths,
+        output_dir=output_dir,
+        alpha=alpha,
+        force_safetensors=force_safetensors,
     )
 
     logger.info(f"Starting local merge of {len(checkpoint_paths)} checkpoints")
@@ -403,7 +407,11 @@ def _run_merge_on_beaker(
 
         env = PythonEnv.null()
         result = subprocess.run(
-            shlex.split(gantry_command_str), capture_output=True, text=True, check=True, env=env.path()
+            shlex.split(gantry_command_str),
+            capture_output=True,
+            text=True,
+            check=True,
+            env=env.path(),
         )
         logger.info("Gantry job submitted successfully")
         logger.info(f"Output: {result.stdout}")
@@ -424,7 +432,10 @@ def _build_merge_command(
     format: str,
     verbose: bool,
 ) -> List[str]:
-    cmd = ["pip install uv && uv pip install .[all] --system && uv pip install transformers --system &&", "olmo-cookbook-merge merge"]
+    cmd = [
+        "pip install uv && uv pip install .[all] --system && uv pip install transformers --system &&",
+        "olmo-cookbook-merge merge",
+    ]
 
     cmd.extend(checkpoint_paths)
     cmd.extend(["--output-dir", output_dir])
@@ -461,7 +472,11 @@ def _build_beaker_cli_command(
     try:
         repo_root = find_repository_root()
         result = subprocess.run(
-            ["git", "status", "--porcelain"], cwd=repo_root, capture_output=True, text=True, check=True
+            ["git", "status", "--porcelain"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=True,
         )
         is_dirty = bool(result.stdout.strip())
 
@@ -514,11 +529,14 @@ def _build_beaker_cli_command(
 
 if __name__ == "__main__":
     run_merge_job(
-        checkpoint_paths=["/data/input/kf/NVFlare/examples/advanced/llm_hf/workspace/hf_sft_multi/site-split_2/simulate_job/app_site-split_2/sft/checkpoint-1340", "/data/input/kf/NVFlare/examples/advanced/llm_hf/workspace/hf_sft_multi/site-split_1/simulate_job/app_site-split_1/sft/checkpoint-1328"],  # List of at least 2 checkpoint dirs
-        output_dir="/data/input/kf/NVFlare/examples/advanced/llm_hf/merged_model/round1_final",  # Where merged models will be saved
+        checkpoint_paths=[
+            "/data/input/kf/NVFlare/examples/advanced/llm_hf/workspace/hf_sft_multi_2/site-split_1/simulate_job/app_site-split_1/sft/checkpoint-664",
+            "/data/input/kf/NVFlare/examples/advanced/llm_hf/workspace/hf_sft_multi_2/site-split_2/simulate_job/app_site-split_2/sft/checkpoint-670",
+        ],  # List of at least 2 checkpoint dirs
+        output_dir="/data/input/kf/NVFlare/examples/advanced/llm_hf/merged_model/hf_sft_mullti_2/round0_merged",  # Where merged models will be saved
         methods=["sma"],  # Use "sma" here (or ["sma", "wma", "ema"] for all)
         # alpha=0.2,  # For EMA only; between 0 and 1
         format="auto",  # "auto" (default), "safetensors", or "pytorch"
         verbose=True,  # Optional: for debug logging
-        use_beaker=False  # Ensures local run
+        use_beaker=False,  # Ensures local run
     )

@@ -22,7 +22,13 @@ import shutil
 import datasets
 import numpy as np
 import torch
-from peft import LoraConfig, get_peft_model, get_peft_model_state_dict, set_peft_model_state_dict, utils
+from peft import (
+    LoraConfig,
+    get_peft_model,
+    get_peft_model_state_dict,
+    set_peft_model_state_dict,
+    utils,
+)
 from transformers import AutoModelForCausalLM, trainer_utils
 from trl import SFTConfig, SFTTrainer
 
@@ -205,7 +211,9 @@ def main():
                 # SFT model can be large, save via HF API
                 # Disable safetensor for local checkpointing
                 trainer.model.save_pretrained(
-                    resume_from_checkpoint_folder, state_dict=state_dict_replace, safe_serialization=False
+                    resume_from_checkpoint_folder,
+                    state_dict=state_dict_replace,
+                    safe_serialization=False,
                 )
 
             # increment num_train_epochs so that the trainer will continue training

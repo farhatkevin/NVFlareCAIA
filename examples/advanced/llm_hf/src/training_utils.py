@@ -1,12 +1,13 @@
+import hashlib
 import json
 import os
 from typing import Any, Callable, Dict, List
-import hashlib
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from transformers import EvalPrediction, TrainerCallback
+
 
 def get_answer_token_ids(tokenizer, choices=("A", "B", "C", "D", "E")) -> List[int]:
     """Return token IDs for choices in the given order (A–E by default).
@@ -119,10 +120,39 @@ def compute_metrics(eval_preds: EvalPrediction, tokenizer, verbose=True) -> Dict
     if verbose:
         print(f"Evaluated {len(valid_idx)} samples, accuracy: {accuracy:.3f}")
 
+        # Log first few examples to see actual generations
+        print("\n--- Sample generations from evaluation ---")
+        for i in range(min(3, len(valid_idx))):  # Show first 3 examples
+            idx = valid_idx[i]
+            # Find the full sequence for this sample in labels
+            label_row = labels[idx] if labels.ndim > 1 else labels
+
+            # Get non-padding tokens
+            non_pad_mask = label_row != -100
+            if non_pad_mask.any():
+                # Decode the full sequence to see the generation
+                valid_tokens = label_row[non_pad_mask]
+                decoded_text = tokenizer.decode(valid_tokens, skip_special_tokens=True)
+
+                # Show predicted vs true answer
+                pred_token = tokenizer.decode([y_pred[i]], skip_special_tokens=True) if i < len(y_pred) else "N/A"
+                true_token = tokenizer.decode([y_true[i]], skip_special_tokens=True) if i < len(y_true) else "N/A"
+
+                print(f"Example {i + 1}:")
+                print(f"  Full text: {decoded_text[-200:]}")  # Last 200 chars
+                print(f"  Predicted: {pred_token}, True: {true_token}")
+                print()
+
     return {"accuracy": accuracy}
 
 
-def compute_loss_mcq5(model_outputs, labels, gradient_accumulation_steps, num_items_in_batch=None, tokenizer=None):
+def compute_loss_mcq5(
+    model_outputs,
+    labels,
+    gradient_accumulation_steps,
+    num_items_in_batch=None,
+    tokenizer=None,
+):
     """
     Compute multiple-choice loss (A–E) using 5-class CE:
       - Each sequence has exactly one supervised answer token
@@ -134,9 +164,9 @@ def compute_loss_mcq5(model_outputs, labels, gradient_accumulation_steps, num_it
 
     # Get the 5 choice token IDs
     choice_ids = torch.tensor(
-        get_answer_token_ids(tokenizer, ("A","B","C","D","E")),
+        get_answer_token_ids(tokenizer, ("A", "B", "C", "D", "E")),
         device=logits.device,
-        dtype=torch.long
+        dtype=torch.long,
     )
     id2cls = {int(tid): i for i, tid in enumerate(choice_ids.tolist())}
 
@@ -357,7 +387,13 @@ class EvalDumpCallback(TrainerCallback):
 class EvalDumpRecordedCallback(TrainerCallback):
     """Write the raw and decoded predictions used during evaluation to JSONL (no regeneration)."""
 
-    def __init__(self, out_path: str, local_rank: int = 0, include_labels: bool = True, tokenizer=None):
+    def __init__(
+        self,
+        out_path: str,
+        local_rank: int = 0,
+        include_labels: bool = True,
+        tokenizer=None,
+    ):
         self.out_path = out_path
         self.local_rank = local_rank
         self.include_labels = include_labels
@@ -386,9 +422,7 @@ class EvalDumpRecordedCallback(TrainerCallback):
         }
         if self.include_labels and labels is not None:
             # Build mapping based on tokenizer if available, else fallback
-            ordered_ids = (
-                get_answer_token_ids(self.tokenizer) if self.tokenizer is not None else [32, 33, 34, 35, 36]
-            )
+            ordered_ids = get_answer_token_ids(self.tokenizer) if self.tokenizer is not None else [32, 33, 34, 35, 36]
             token_to_choice = {tid: ch for tid, ch in zip(ordered_ids, ["A", "B", "C", "D", "E"])}
 
             # Extract compact answer tokens instead of full sequences
@@ -592,6 +626,26 @@ class WandbMetricsLogger(TrainerCallback):
             if "eval_loss" in metrics and metrics["eval_loss"] is not None:
                 log_items["eval/loss"] = metrics["eval_loss"]
                 log_items["eval_loss"] = metrics["eval_loss"]
+            # Training metrics if produced via evaluate(..., metric_key_prefix="train")
+            if "train_accuracy" in metrics and metrics["train_accuracy"] is not None:
+                print("Logging train_accuracy to W&B")
+                log_items["train/accuracy"] = metrics["train_accuracy"]
+                log_items["train_accuracy"] = metrics["train_accuracy"]
+            if "train_loss" in metrics and metrics["train_loss"] is not None:
+                print("Logging train_loss to W&B")
+                log_items["train/loss"] = metrics["train_loss"]
+                log_items["train_loss"] = metrics["train_loss"]
+
+            # Also log current training loss from trainer state if available
+            if hasattr(state, "log_history") and state.log_history:
+                # Get the most recent training loss
+                for log_entry in reversed(state.log_history):
+                    if "loss" in log_entry:
+                        print("Logging current train/loss to W&B")
+                        log_items["train/loss"] = log_entry["loss"]
+                        log_items["train_loss"] = log_entry["loss"]
+                        break
+
             if not log_items:
                 return
 
@@ -600,6 +654,35 @@ class WandbMetricsLogger(TrainerCallback):
             wandb.log(log_items)
         except Exception as e:
             print(f"WandbMetricsLogger failed: {e}")
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        """Mirror training loss to W&B under train/* keys for consistency."""
+        if self.local_rank != 0 or not isinstance(logs, dict):
+            return
+        try:
+            import wandb  # type: ignore
+
+            if wandb.run is None:
+                return
+            log_items = {}
+            if "loss" in logs and logs["loss"] is not None:
+                print("Logging train/loss to W&B")
+                log_items["train/loss"] = logs["loss"]
+                log_items["train_loss"] = logs["loss"]
+            if "accuracy" in logs and logs["accuracy"] is not None:
+                print("Logging train/accuracy to W&B")
+                log_items["train/accuracy"] = logs["accuracy"]
+                log_items["train_accuracy"] = logs["accuracy"]
+            if "learning_rate" in logs:
+                log_items["learning_rate"] = logs["learning_rate"]
+            if "epoch" in logs:
+                log_items["epoch"] = logs["epoch"]
+            if not log_items:
+                return
+            log_items["fl_round"] = self.current_round
+            wandb.log(log_items)
+        except Exception as e:
+            print(f"WandbMetricsLogger on_log failed: {e}")
 
 
 def create_loss_logger(site_name: str, output_path: str, loss_log_file: str | None, local_rank: int) -> LossFileLogger:
@@ -615,9 +698,80 @@ def create_loss_logger(site_name: str, output_path: str, loss_log_file: str | No
     return LossFileLogger(log_file=log_file, site_name=site_name, local_rank=local_rank)
 
 
+class TrainSubsetEvalCallback(TrainerCallback):
+    """Evaluate a small subset of the training set to log train accuracy/loss.
+
+    - Triggers at the end of each training epoch (local epoch in an FL round).
+    - Uses the same compute_metrics/preprocess as evaluation.
+    - Writes metrics with the `train_` prefix (Trainer adds it); WandbMetricsLogger mirrors to train/*.
+    - Must run on all processes in DDP; only rank 0 prints/logs to console.
+    """
+
+    def __init__(self, train_dataset, sample_size: int = 256, local_rank: int = 0):
+        self.local_rank = local_rank
+        self.sample_size = max(1, int(sample_size))
+        self.trainer = None
+        try:
+            n = len(train_dataset)
+        except Exception:
+            n = 0
+        if n and hasattr(train_dataset, "select"):
+            self.train_subset = train_dataset.select(range(min(self.sample_size, n)))
+        else:
+            self.train_subset = train_dataset
+        self._in_progress = False
+
+    def bind_trainer(self, trainer):
+        self.trainer = trainer
+
+    def on_epoch_end(self, args, state, control, **kwargs):
+        if self.trainer is None or self._in_progress:
+            return
+        try:
+            self._in_progress = True
+            # Check if we have a processed train dataset to work with
+            if hasattr(self.trainer, "train_dataset") and hasattr(self.trainer.train_dataset, "select"):
+                # Try to use the trainer's processed train dataset if available
+                try:
+                    # Create a small subset from the trainer's processed dataset
+                    n_processed = len(self.trainer.train_dataset)
+                    sample_size = min(self.sample_size, n_processed)
+                    if sample_size > 0:
+                        subset_indices = list(range(sample_size))
+                        processed_subset = self.trainer.train_dataset.select(subset_indices)
+                        metrics = self.trainer.evaluate(eval_dataset=processed_subset, metric_key_prefix="train")
+                    else:
+                        if self.local_rank == 0:
+                            print("[train subset eval] No processed training data available")
+                        return
+                except Exception as subset_error:
+                    if self.local_rank == 0:
+                        print(f"[train subset eval] Could not create processed subset: {subset_error}")
+                    return
+            else:
+                # Fallback: Skip evaluation if we can't access processed data
+                if self.local_rank == 0:
+                    print("[train subset eval] Skipping - processed training dataset not accessible")
+                return
+
+            if self.local_rank == 0:
+                try:
+                    ta = metrics.get("train_accuracy")
+                    tl = metrics.get("train_loss")
+                    print(f"[train subset eval] train_accuracy={ta} train_loss={tl}")
+                except Exception:
+                    print(f"[train subset eval] metrics: {metrics}")
+        except Exception as e:
+            if self.local_rank == 0:
+                print(f"TrainSubsetEvalCallback failed: {e}")
+        finally:
+            self._in_progress = False
+
+
 # ------------------------------
 # Model/weights fingerprinting
 # ------------------------------
+
 
 def _tensor_sample_bytes(t: torch.Tensor, max_elems: int = 4096) -> bytes:
     """Return a stable byte sample from a tensor for hashing.

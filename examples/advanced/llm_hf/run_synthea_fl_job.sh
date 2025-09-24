@@ -3,8 +3,8 @@
 python3 synthea_llm_hf_fl_job.py \
  --client_ids split_1 split_2 \
  --data_path ${PWD}/new_synthea_data \
- --workspace_dir ${PWD}/workspace/hf_sft_multi \
- --job_dir ${PWD}/workspace/jobs/hf_sft_multi \
+ --workspace_dir ${PWD}/workspace/hf_sft_multi_2 \
+ --job_dir ${PWD}/workspace/jobs/hf_sft_multi_2 \
  --train_mode SFT \
  --threads 1 \
  --gpu "[0],[1]" \

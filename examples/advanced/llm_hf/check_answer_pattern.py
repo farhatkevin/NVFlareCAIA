@@ -70,13 +70,18 @@ def check_answer_pattern(labels_raw_file):
                 else:
                     results["invalid_pattern"] += 1
                     results["pattern_details"].append(
-                        {"sample": i, "error": f"Not enough tokens before first -100 (position {first_neg100_idx})"}
+                        {
+                            "sample": i,
+                            "error": f"Not enough tokens before first -100 (position {first_neg100_idx})",
+                        }
                     )
 
             except ValueError:
                 # No -100 found
                 results["invalid_pattern"] += 1
-                results["pattern_details"].append({"sample": i, "error": "No -100 tokens found in sequence"})
+                results["pattern_details"].append(
+                    {"sample": i, "error": "No -100 tokens found in sequence"}
+                )
 
     return results
 
@@ -89,7 +94,9 @@ def print_results(results):
     print(f"Total samples analyzed: {results['total_samples']}")
     print(f"Samples with valid pattern: {results['valid_pattern']}")
     print(f"Samples with invalid pattern: {results['invalid_pattern']}")
-    print(f"Success rate: {results['valid_pattern']/results['total_samples']*100:.1f}%")
+    print(
+        f"Success rate: {results['valid_pattern'] / results['total_samples'] * 100:.1f}%"
+    )
 
     print("\nAnswer token distribution:")
     token_to_letter = {32: "A", 33: "B", 34: "C", 35: "D", 36: "E"}
@@ -106,7 +113,7 @@ def print_results(results):
             status = "✓" if detail["pattern_valid"] else "✗"
             print(
                 f"Sample {detail['sample']:2d}: {status} [{detail['token_-3']}, {detail['token_-2']}, {detail['token_-1']}] "
-                f"at position {detail['first_neg100_at']-2}"
+                f"at position {detail['first_neg100_at'] - 2}"
             )
 
 

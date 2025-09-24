@@ -16,8 +16,9 @@ Run from repo root:
 import os
 import sys
 from types import SimpleNamespace
-import torch.nn.functional as F
+
 import torch
+import torch.nn.functional as F
 
 
 def add_src_to_path():
@@ -74,13 +75,12 @@ def build_dummy_batch():
     #   Sample 1: answer=B at pos=2, tail at pos=5
     #   Sample 2: answer=E at pos=3, tail at pos=5
 
-
     ans_tokens = ["C", "B", "E"]
     ans_positions = [2, 2, 3]
 
     for i in range(B):
         labels[i, ans_positions[i]] = tok.encode(ans_tokens[i])[0]
-        labels[i, :ans_positions[i]] = torch.randint(0, V, (ans_positions[i],), dtype=torch.long)
+        labels[i, : ans_positions[i]] = torch.randint(0, V, (ans_positions[i],), dtype=torch.long)
         labels[i, ans_positions[i] + 1] = 120098
         # labels[i, tail_positions[i]] = 0  # tail token id (can be anything, not used)
 
@@ -100,6 +100,7 @@ def build_dummy_batch():
     print("logits:", logits)
     return SimpleNamespace(logits=logits), labels, tok
 
+
 def compute_loss_mcq5(model_outputs, labels, num_items_in_batch=None, tokenizer=None):
     """
     Compute multiple-choice loss (A–E) using 5-class CE:
@@ -112,9 +113,9 @@ def compute_loss_mcq5(model_outputs, labels, num_items_in_batch=None, tokenizer=
 
     # Get the 5 choice token IDs
     choice_ids = torch.tensor(
-        get_answer_token_ids(tokenizer, ("A","B","C","D","E")),
+        get_answer_token_ids(tokenizer, ("A", "B", "C", "D", "E")),
         device=logits.device,
-        dtype=torch.long
+        dtype=torch.long,
     )
     id2cls = {int(tid): i for i, tid in enumerate(choice_ids.tolist())}
 
@@ -158,7 +159,7 @@ def compute_loss_mcq5(model_outputs, labels, num_items_in_batch=None, tokenizer=
     print(f"{choice_ids=}")
     logits_5 = answer_logits[:, choice_ids]
     print(f"{logits_5=}")
-    
+
     probs = F.softmax(logits_5, dim=-1)
     pred_classes = probs.argmax(dim=-1)
 
@@ -176,7 +177,6 @@ def compute_loss_mcq5(model_outputs, labels, num_items_in_batch=None, tokenizer=
 
     print(f"[compute_loss_mcq5] target_classes={target_classes.tolist()}, loss={loss.item():.10f}")
     return loss
-
 
 
 def main():
@@ -197,4 +197,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

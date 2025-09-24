@@ -25,7 +25,13 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from accelerate import PartialState
-from peft import LoraConfig, get_peft_model, get_peft_model_state_dict, set_peft_model_state_dict, utils
+from peft import (
+    LoraConfig,
+    get_peft_model,
+    get_peft_model_state_dict,
+    set_peft_model_state_dict,
+    utils,
+)
 from transformers import AutoModelForCausalLM, TrainerCallback, trainer_utils
 from trl import SFTConfig, SFTTrainer
 
@@ -300,7 +306,9 @@ def main():
                     # SFT model can be large, save via HF API
                     # Disable safetensor for now
                     trainer.model.save_pretrained(
-                        resume_from_checkpoint_folder, state_dict=global_model, safe_serialization=False
+                        resume_from_checkpoint_folder,
+                        state_dict=global_model,
+                        safe_serialization=False,
                     )
 
             # Wait for main process to finish saving before continuing

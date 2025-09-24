@@ -18,22 +18,41 @@ def build_input_text(tokenizer, prompt: str, use_chat_template: bool):
 
 def main():
     parser = argparse.ArgumentParser(description="Quick test inference for a local HF model folder")
-    parser.add_argument("model_dir", type=str, help="Path to local HF model folder (e.g., .../round_1_model_hf)")
+    parser.add_argument(
+        "model_dir",
+        type=str,
+        help="Path to local HF model folder (e.g., .../round_1_model_hf)",
+    )
     parser.add_argument("--prompt", type=str, default="Hello!", help="Prompt text to generate from")
     parser.add_argument("--max_new_tokens", type=int, default=64, help="Max new tokens to generate")
     parser.add_argument(
-        "--temperature", type=float, default=0.7, help="Sampling temperature (ignored if do_sample=False)"
+        "--temperature",
+        type=float,
+        default=0.7,
+        help="Sampling temperature (ignored if do_sample=False)",
     )
     parser.add_argument("--top_p", type=float, default=0.9, help="Top-p for nucleus sampling")
-    parser.add_argument("--do_sample", action="store_true", help="Enable sampling (default off -> greedy)")
     parser.add_argument(
-        "--trust_remote_code", action="store_true", help="Trust remote code when loading model/tokenizer"
+        "--do_sample",
+        action="store_true",
+        help="Enable sampling (default off -> greedy)",
     )
     parser.add_argument(
-        "--use_chat_template", action="store_true", help="Use tokenizer.apply_chat_template if available"
+        "--trust_remote_code",
+        action="store_true",
+        help="Trust remote code when loading model/tokenizer",
     )
     parser.add_argument(
-        "--dtype", type=str, default="auto", choices=["auto", "fp32", "fp16", "bf16"], help="Torch dtype for model"
+        "--use_chat_template",
+        action="store_true",
+        help="Use tokenizer.apply_chat_template if available",
+    )
+    parser.add_argument(
+        "--dtype",
+        type=str,
+        default="auto",
+        choices=["auto", "fp32", "fp16", "bf16"],
+        help="Torch dtype for model",
     )
     args = parser.parse_args()
 
