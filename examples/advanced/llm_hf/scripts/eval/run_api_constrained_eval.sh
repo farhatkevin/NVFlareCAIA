@@ -12,8 +12,8 @@ BATCH_SIZE=5  # Smaller batch size for API rate limits
 # Model configurations - uncomment the one you want to test
 # OpenAI models
 PROVIDER="openai"
-# MODEL_NAME="gpt-5-2025-08-07"
-MODEL_NAME="gpt-5-nano-2025-08-07"
+MODEL_NAME="gpt-5-2025-08-07"
+# MODEL_NAME="gpt-5-nano-2025-08-07"
 # MODEL_NAME="gpt-4o-mini"
 # MODEL_NAME="gpt-4o"
 # MODEL_NAME="gpt-3.5-turbo"

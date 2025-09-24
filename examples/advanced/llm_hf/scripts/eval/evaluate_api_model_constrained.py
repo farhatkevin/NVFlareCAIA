@@ -368,7 +368,7 @@ async def evaluate_model_on_dataset(
     first_result = True
 
     # Create async session
-    timeout = aiohttp.ClientTimeout(total=30)
+    timeout = aiohttp.ClientTimeout(total=90)
     async with aiohttp.ClientSession(timeout=timeout) as session:
 
         # Process in batches
