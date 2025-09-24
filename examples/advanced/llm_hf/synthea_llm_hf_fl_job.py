@@ -188,11 +188,9 @@ def main():
             job.to(dequantizer, site_name, tasks=["train"], filter_type=FilterType.TASK_DATA)
 
         # Add additional parameters to clients
-        # TODO: this code is problematic, if i keep it i get AttributeError: 'dict' object has no attribute '__module__'. Did you mean: '__reduce__'?
-        # if i remove the code, we can run, but the client timeout is not set and i keep hitting timeout errors (no quantization)
-        # with quantization, no errors with timeout, training happens normaly
-        client_params = {"submit_task_result_timeout": 300}
-        job.to(client_params, site_name)
+        #TODO: can add this if using nvflare 2.7rc, but with 2.6 will fail with AttributeError: 'dict' object has no attribute '__module__'. Did you mean: '__reduce__'?
+        # client_params = {"submit_task_result_timeout": 300}
+        # job.to(client_params, site_name)
 
     # Export the job
     print("job_dir=", job_dir)
