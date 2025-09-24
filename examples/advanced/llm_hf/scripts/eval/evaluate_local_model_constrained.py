@@ -96,9 +96,10 @@ def evaluate_model_on_dataset(
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
             torch_dtype="auto",  # Let the model use its preferred dtype (likely BFloat16)
-            device_map="auto",
-            max_memory={i: "70GB" for i in range(torch.cuda.device_count())},
+            device_map="balanced",  # Balanced memory usage across GPUs
+            max_memory={i: "78GB" for i in range(torch.cuda.device_count())},
             low_cpu_mem_usage=True,
+            # tensor_parallel=num_gpus := torch.cuda.device_count(
         )
     else:
         model = AutoModelForCausalLM.from_pretrained(

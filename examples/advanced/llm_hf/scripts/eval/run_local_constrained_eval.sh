@@ -10,9 +10,9 @@ set -e  # Exit on any error
 # MODEL_NAME="allenai/OLMo-2-0425-1B-Instruct"
 # MODEL_NAME="/data/input/kf/NVFlare/examples/advanced/llm_hf/merged_model/round1_final/merged_sma"
 # MODEL_NAME="/data/input/kf/NVFlare/examples/advanced/llm_hf/workspace/hf_sft_multi_2/server/simulate_job/app_server/round_1_model_hf"
-MODEL_NAME="google/gemma-3-12b-it"
+MODEL_NAME="aaditya/Llama3-OpenBioLLM-70B"
 DATASET_PATHS="/data/input/kf/NVFlare/examples/advanced/llm_hf/new_synthea_data/split_1/testing.jsonl /data/input/kf/NVFlare/examples/advanced/llm_hf/new_synthea_data/split_2/testing.jsonl"
-BATCH_SIZE=64
+BATCH_SIZE=16
 # Create model name for directory (replace / and special chars with _)
 MODEL_DIR_NAME=$(echo "$MODEL_NAME" | sed 's/[\/:]/_/g')
 OUTPUT_DIR="local_model_results_${MODEL_DIR_NAME}_$(date +%Y%m%d_%H%M%S)"
