@@ -6,8 +6,29 @@ from typing import Any, Callable, Dict, List
 import numpy as np
 import torch
 import torch.nn.functional as F
-from transformers import EvalPrediction, TrainerCallback
+from transformers import EvalPrediction, TrainerCallback, LogitsProcessor, LogitsProcessorList
 
+# ConstrainedLogitsProcessor - copied from evaluate_local_model_constrained.py for consistency
+class ConstrainedLogitsProcessor(LogitsProcessor):
+    """Logits processor that constrains generation to only allowed tokens."""
+
+    def __init__(self, allowed_token_ids):
+        """
+        Args:
+            allowed_token_ids: List of token IDs that are allowed (e.g., for 'A', 'B', 'C', 'D', 'E').
+        """
+        self.allowed_token_ids = allowed_token_ids
+
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
+        # Create mask with -inf for all tokens
+        mask = torch.full_like(scores, float("-inf"))
+
+        # Set allowed tokens to 0 (no penalty)
+        for token_id in self.allowed_token_ids:
+            mask[:, token_id] = 0
+
+        scores = scores + mask
+        return scores
 
 def get_answer_token_ids(tokenizer, choices=("A", "B", "C", "D", "E")) -> List[int]:
     """Return token IDs for choices in the given order (A–E by default).
@@ -67,7 +88,7 @@ def preprocess_logits_for_metrics(logits, labels, tokenizer):
 
 
 def compute_metrics(eval_preds: EvalPrediction, tokenizer, verbose=True) -> Dict[str, float]:
-    """Compare argmax predictions to true labels for accuracy"""
+    """Compare argmax predictions to true labels for accuracy using constrained generation"""
     pred_ids, labels = eval_preds
 
     pred_ids = np.asarray(pred_ids).reshape(-1)
@@ -77,40 +98,32 @@ def compute_metrics(eval_preds: EvalPrediction, tokenizer, verbose=True) -> Dict
         return {"accuracy": 0.0}
 
     # Build y_true as the LAST non-ignored A–E token per sample (assistant answer at end)
-    # Ordered IDs; use set for membership checks
     answer_ids = get_answer_token_ids(tokenizer)
     true_ids = []
     for i in range(labels.shape[0]):
         row = labels[i]
         idxs = np.where(row != -100)[0]
-        # print(f"row: {row}, idxs: {idxs}")
         t_id = -1
         for j in reversed(idxs.tolist()):
             if row[j] in answer_ids:
-                # print(f"found answer token {row[j]} at position {j}")
                 t_id = int(row[j])
-                # print("position where token is found: ", j)
-                # print("idk", row[j-3:j+4])
-                # print("token_id:", t_id)
                 break
         true_ids.append(t_id)
 
     true_ids = np.array(true_ids, dtype=np.int64)
-    # print("true_ids: ", true_ids)
     valid_idx = np.where(true_ids != -1)[0]
-    # print("valid idx: ", valid_idx)
     if valid_idx.size == 0:
         return {"accuracy": 0.0}
+
     y_true = true_ids[valid_idx]
-    # print("y_true: ", y_true)
     y_pred = pred_ids[valid_idx]
+
     # Map predicted class indices (0..4) to tokenizer-specific token IDs for A–E
     index_to_token = {i: tid for i, tid in enumerate(answer_ids)}
     for i in range(len(y_pred)):
         if y_pred[i] in index_to_token:
             y_pred[i] = index_to_token[y_pred[i]]
 
-    # print("y_pred: ", y_pred)
     # Truncate to common length if needed (defensive)
     m = min(len(y_true), len(y_pred))
     if m == 0:
@@ -122,28 +135,204 @@ def compute_metrics(eval_preds: EvalPrediction, tokenizer, verbose=True) -> Dict
 
         # Log first few examples to see actual generations
         print("\n--- Sample generations from evaluation ---")
-        for i in range(min(3, len(valid_idx))):  # Show first 3 examples
+        for i in range(min(3, len(valid_idx))):
             idx = valid_idx[i]
-            # Find the full sequence for this sample in labels
             label_row = labels[idx] if labels.ndim > 1 else labels
 
-            # Get non-padding tokens
             non_pad_mask = label_row != -100
             if non_pad_mask.any():
-                # Decode the full sequence to see the generation
                 valid_tokens = label_row[non_pad_mask]
                 decoded_text = tokenizer.decode(valid_tokens, skip_special_tokens=True)
 
-                # Show predicted vs true answer
                 pred_token = tokenizer.decode([y_pred[i]], skip_special_tokens=True) if i < len(y_pred) else "N/A"
                 true_token = tokenizer.decode([y_true[i]], skip_special_tokens=True) if i < len(y_true) else "N/A"
 
                 print(f"Example {i + 1}:")
-                print(f"  Full text: {decoded_text[-200:]}")  # Last 200 chars
+                print(f"  Full text: {decoded_text[-200:]}")
                 print(f"  Predicted: {pred_token}, True: {true_token}")
                 print()
 
     return {"accuracy": accuracy}
+
+
+def compute_metrics_constrained(eval_dataset, model, tokenizer, choices=("A", "B", "C", "D", "E"), verbose=True) -> Dict[str, float]:
+    """
+    Compute metrics using constrained generation (like offline eval).
+
+    This function performs actual constrained generation during evaluation,
+    matching the methodology used in the offline evaluation script.
+    """
+    device = next(model.parameters()).device
+
+    # Get allowed token IDs for constrained generation
+    allowed_token_ids = [tokenizer.convert_tokens_to_ids(token) for token in choices]
+
+    # Verify all tokens are in vocabulary
+    if any(tid == tokenizer.unk_token_id for tid in allowed_token_ids):
+        missing_tokens = [choices[i] for i, tid in enumerate(allowed_token_ids) if tid == tokenizer.unk_token_id]
+        raise ValueError(f"Some choice tokens not in vocabulary: {missing_tokens}")
+
+    if verbose:
+        print(f"Choice tokens mapped to IDs: {dict(zip(choices, allowed_token_ids))}")
+
+    # Create constrained logits processor
+    logits_processors = LogitsProcessorList([ConstrainedLogitsProcessor(allowed_token_ids)])
+
+    correct = 0
+    total = 0
+    predictions = []
+
+    model.eval()
+    with torch.no_grad():
+        for i, example in enumerate(eval_dataset):
+            # Get the input prompt (everything before the answer)
+            messages = example["messages"]
+
+            # Extract the user prompt (before assistant answer)
+            prompt_messages = [msg for msg in messages if msg["role"] != "assistant"]
+
+            # Apply chat template to get input prompt
+            if hasattr(tokenizer, "apply_chat_template") and tokenizer.chat_template is not None:
+                formatted_prompt = tokenizer.apply_chat_template(
+                    prompt_messages, tokenize=False, add_generation_prompt=True
+                )
+            else:
+                # Fallback if no chat template
+                formatted_prompt = prompt_messages[-1]["content"] if prompt_messages else ""
+
+            # Tokenize input
+            inputs = tokenizer(
+                formatted_prompt,
+                return_tensors="pt",
+                padding=False,
+                truncation=True,
+                max_length=4096,
+            )
+            inputs = {k: v.to(device) for k, v in inputs.items()}
+
+            # Generate with constraints
+            outputs = model.generate(
+                inputs["input_ids"],
+                attention_mask=inputs["attention_mask"],
+                max_new_tokens=1,
+                logits_processor=logits_processors,
+                do_sample=False,  # Greedy decoding
+                pad_token_id=tokenizer.eos_token_id,
+            )
+
+            # Extract generated token
+            input_length = inputs["input_ids"].shape[1]
+            generated_tokens = outputs[0][input_length:]
+            predicted_text = tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
+
+            # Map prediction to choice index
+            try:
+                predicted_idx = choices.index(predicted_text)
+            except ValueError:
+                predicted_idx = -1
+
+            # Get ground truth from messages
+            ground_truth_text = None
+            for msg in messages:
+                if msg["role"] == "assistant":
+                    ground_truth_text = msg["content"].strip()
+                    break
+
+            if ground_truth_text and ground_truth_text in choices:
+                ground_truth_idx = choices.index(ground_truth_text)
+            else:
+                ground_truth_idx = -1
+
+            # Check if correct
+            is_correct = predicted_idx == ground_truth_idx and predicted_idx != -1
+            if is_correct:
+                correct += 1
+            total += 1
+
+            predictions.append({
+                "predicted_choice": predicted_text,
+                "predicted_idx": predicted_idx,
+                "ground_truth_choice": ground_truth_text,
+                "ground_truth_idx": ground_truth_idx,
+                "is_correct": is_correct
+            })
+
+    accuracy = correct / total if total > 0 else 0.0
+
+    if verbose:
+        print(f"Constrained generation evaluation:")
+        print(f"Total examples: {total}")
+        print(f"Correct predictions: {correct}")
+        print(f"Accuracy: {accuracy:.4f}")
+
+        # Show first few examples
+        print("\n--- Sample constrained generations ---")
+        for i, pred in enumerate(predictions[:3]):
+            print(f"Example {i + 1}:")
+            print(f"  Predicted: {pred['predicted_choice']}")
+            print(f"  Ground truth: {pred['ground_truth_choice']}")
+            print(f"  Correct: {pred['is_correct']}")
+            print()
+
+    return {"accuracy": accuracy}
+
+
+
+
+from trl import SFTTrainer
+
+class ConstrainedSFTTrainer(SFTTrainer):
+    """
+    Direct subclass of SFTTrainer that runs constrained evaluation within the evaluation loop.
+    This ensures eval_accuracy is available for metric_for_best_model selection.
+    """
+
+    def __init__(self, constrained_eval_dataset=None, constrained_eval_tokenizer=None,
+                 constrained_eval_choices=("A", "B", "C", "D", "E"), **kwargs):
+
+        # Store constrained eval parameters
+        self.constrained_eval_dataset = constrained_eval_dataset
+        self.constrained_eval_tokenizer = constrained_eval_tokenizer
+        self.constrained_eval_choices = constrained_eval_choices
+
+        # Initialize parent SFTTrainer
+        super().__init__(**kwargs)
+
+    def evaluation_loop(self, dataloader, description: str, prediction_loss_only=None,
+                       ignore_keys=None, metric_key_prefix="eval"):
+        """
+        Override evaluation_loop to add constrained metrics before best model checking.
+        """
+        # Run the normal evaluation first (gets eval_loss)
+        output = super().evaluation_loop(
+            dataloader=dataloader,
+            description=description,
+            prediction_loss_only=prediction_loss_only,
+            ignore_keys=ignore_keys,
+            metric_key_prefix=metric_key_prefix
+        )
+
+        # Add constrained accuracy for eval runs (not train subset evals)
+        if (metric_key_prefix == "eval" and
+            self.constrained_eval_dataset is not None):
+
+            try:
+                constrained_results = compute_metrics_constrained(
+                    eval_dataset=self.constrained_eval_dataset,
+                    model=self.model,
+                    tokenizer=self.constrained_eval_tokenizer,
+                    choices=self.constrained_eval_choices,
+                    verbose=False  # Reduce verbosity
+                )
+
+                # Add to the metrics that will be used for model selection
+                if "accuracy" in constrained_results:
+                    output.metrics["eval_accuracy"] = constrained_results["accuracy"]
+
+            except Exception as e:
+                print(f"Constrained evaluation failed: {e}")
+
+        return output
 
 
 def compute_loss_mcq5(
@@ -622,6 +811,7 @@ class WandbMetricsLogger(TrainerCallback):
             if "eval_accuracy" in metrics and metrics["eval_accuracy"] is not None:
                 log_items["eval/accuracy"] = metrics["eval_accuracy"]
                 log_items["eval_accuracy"] = metrics["eval_accuracy"]
+
             # Loss: log both grouped and flat keys
             if "eval_loss" in metrics and metrics["eval_loss"] is not None:
                 log_items["eval/loss"] = metrics["eval_loss"]

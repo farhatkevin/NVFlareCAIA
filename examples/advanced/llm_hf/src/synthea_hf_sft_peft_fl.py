@@ -36,10 +36,10 @@ from peft import (
     utils,
 )
 from training_utils import (
+    ConstrainedSFTTrainer,
     EvalDumpRecordedCallback,
     TrainSubsetEvalCallback,
     WandbMetricsLogger,
-    compute_loss_mcq5,
     compute_metrics,
     create_loss_logger,
     filter_by_length_messages,
@@ -96,6 +96,12 @@ def cleanup_distributed_training():
 
 
 def main():
+    ##########################################################
+    # EVALUATION METHOD CONFIGURATION
+    # Set USE_CONSTRAINED_EVAL=False to revert to old logits-based evaluation
+    ##########################################################
+    USE_CONSTRAINED_EVAL = True
+
     # initializes NVFlare client API
     flare.init()
 
@@ -199,7 +205,9 @@ def main():
     # TODO: remove select after testing
     dataset_train = (
         # datasets.load_dataset("json", data_files=args.data_path_train, split="train").shuffle(seed=args.seed)
-        datasets.load_dataset("json", data_files=args.data_path_train, split="train").shuffle(seed=args.seed)
+        datasets.load_dataset("json", data_files=args.data_path_train, split="train")
+        .shuffle(seed=args.seed)
+        # .select(range(500))
     )
     dataset_valid = (
         datasets.load_dataset("json", data_files=args.data_path_valid, split="train")
@@ -331,21 +339,22 @@ def main():
         lr_scheduler_type=args.lr_scheduler,
         lr_scheduler_kwargs={"num_cycles": 2},
         disable_tqdm=True,
-        save_total_limit=2,
         # safetensors will remove shared layers, e.g. lm_head.weight
         # disable for local checkpointing
         eval_strategy="steps",
         # eval_on_start=True,
-        eval_steps=10,
+        eval_steps=20,
         save_safetensors=False,
         seed=args.seed,
         data_seed=args.seed,
+        # Conditional settings based on evaluation method
+        prediction_loss_only=USE_CONSTRAINED_EVAL,  # True for constrained (saves memory), False for old method
         # Multi-GPU specific settings
         ddp_find_unused_parameters=False,
         dataloader_pin_memory=False,
         # Prompt Completion w/ Mitchell
         # completion_only_loss=True,
-        metric_for_best_model="eval_accuracy",
+        metric_for_best_model="eval_accuracy",  # Both methods will provide eval_accuracy
         max_length=MAX_SEQ_LENGTH,
         report_to=["wandb"],
     )
@@ -393,12 +402,18 @@ def main():
     except Exception as e:
         print(f"wandb.init not available or failed: {e}")
 
-    # Prepare compute_metrics wrapper and optional eval dump recorder
-    base_compute = partial(compute_metrics, tokenizer=tokenizer, verbose=True)
-    compute_fn = base_compute
+    if USE_CONSTRAINED_EVAL:
+        # NEW METHOD: Custom trainer with built-in constrained evaluation
+        compute_fn = None
+    else:
+        # OLD METHOD: Logits-based evaluation with position extraction
+        compute_fn = partial(compute_metrics, tokenizer=tokenizer, verbose=True)
+        if args.eval_dump_file:
+            compute_fn = wrap_compute_metrics(compute_fn)
+
+    # Set up eval dump callback if requested
     eval_dump_cb = None
     if args.eval_dump_file:
-        compute_fn = wrap_compute_metrics(base_compute)
         dump_path = (
             args.eval_dump_file
             if os.path.isabs(args.eval_dump_file)
@@ -408,21 +423,40 @@ def main():
 
     ##########################################################
 
-    trainer = SFTTrainer(
-        model=model,
-        train_dataset=dataset_train,
-        eval_dataset=dataset_valid,
-        peft_config=peft_config,
-        processing_class=tokenizer,
-        compute_metrics=compute_fn,
-        # compute_loss_func=compute_loss_mcq5,
-        # compute_loss_func=lambda outputs, labels, num_items_in_batch=None: compute_loss_mcq5(outputs, labels, train_args.gradient_accumulation_steps, num_items_in_batch, tokenizer=tokenizer),
-        # need to pass in tokenizer to get encoded A–E labels, so using lambda function
-        preprocess_logits_for_metrics=lambda logits, labels: preprocess_logits_for_metrics(logits, labels, tokenizer),
-        # preprocess_logits_for_metrics=preprocess_logits_for_metrics,
-        args=train_args,
-        callbacks=[StopCallback(), loss_logger, wandb_cb] + ([eval_dump_cb] if eval_dump_cb is not None else []),
-    )
+    # Build callback list
+    callbacks = [StopCallback(), loss_logger, wandb_cb]
+    if eval_dump_cb is not None:
+        callbacks.append(eval_dump_cb)
+
+    if USE_CONSTRAINED_EVAL:
+        # NEW METHOD: Custom trainer with built-in constrained evaluation
+        trainer = ConstrainedSFTTrainer(
+            model=model,
+            train_dataset=dataset_train,
+            eval_dataset=dataset_valid,
+            peft_config=peft_config,
+            processing_class=tokenizer,
+            compute_metrics=None,
+            args=train_args,
+            callbacks=callbacks,
+            # Constrained evaluation parameters
+            constrained_eval_dataset=dataset_valid,
+            constrained_eval_tokenizer=tokenizer,
+            constrained_eval_choices=("A", "B", "C", "D", "E"),
+        )
+    else:
+        # OLD METHOD: Logits-based evaluation
+        trainer = SFTTrainer(
+            model=model,
+            train_dataset=dataset_train,
+            eval_dataset=dataset_valid,
+            peft_config=peft_config,
+            processing_class=tokenizer,
+            compute_metrics=compute_fn,
+            preprocess_logits_for_metrics=lambda logits, labels: preprocess_logits_for_metrics(logits, labels, tokenizer),
+            args=train_args,
+            callbacks=callbacks,
+        )
 
     # Evaluate a small subset of the training set at epoch end to log train accuracy/loss
     try:
@@ -507,8 +541,8 @@ def main():
         eval_results = trainer.evaluate()
         eval_loss = float(eval_results["eval_loss"])
         eval_accuracy = eval_results.get("eval_accuracy", 0.0)
-        if local_rank == 0:
-            print(f"Evaluation - Loss: {eval_loss:.4f}, Accuracy: {eval_accuracy:.4f}")
+        # if local_rank == 0:
+        #     print(f"Evaluation - Loss: {eval_loss:.4f}, Accuracy: {eval_accuracy:.4f}")
 
         # Train
         if curr_round == 0:
