@@ -137,7 +137,7 @@ def main():
         client_id = client_ids[i]
         site_name = f"site-{client_id}"
         data_path_train = os.path.join(args.data_path, client_id, "training.jsonl")
-        data_path_valid = os.path.join(args.data_path, client_id, "validation.jsonl")
+        data_path_valid = os.path.join(args.data_path, client_id, "testing.jsonl")
 
         script_args = (
             f"--model_name_or_path {model_name_or_path} "
