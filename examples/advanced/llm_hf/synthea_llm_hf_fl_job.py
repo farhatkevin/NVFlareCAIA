@@ -15,19 +15,21 @@
 import argparse
 import os
 
+from src.hf_file_model_persistor import HFFileModelPersistor
+
 from nvflare import FedJob, FilterType
 from nvflare.app_common.widgets.intime_model_selector import IntimeModelSelector
 from nvflare.app_common.workflows.fedavg import FedAvg
 from nvflare.app_opt.pt.file_model_persistor import PTFileModelPersistor
 from nvflare.app_opt.pt.quantization.dequantizer import ModelDequantizer
 from nvflare.app_opt.pt.quantization.quantizer import ModelQuantizer
-from nvflare.job_config.script_runner import ScriptRunner
+from nvflare.job_config.script_runner import BaseScriptRunner, ScriptRunner
 from nvflare.private.fed.utils.fed_utils import split_gpus
 
 
 def main():
     args = define_parser()
-    train_script = "src/hf_sft_peft_fl.py"
+    train_script = "src/synthea_hf_sft_peft_fl.py"
     client_ids = args.client_ids
     num_clients = len(client_ids)
     # get the GPU assignments and ports
@@ -58,6 +60,9 @@ def main():
     model_name_or_path = args.model_name_or_path
     train_mode = args.train_mode
     message_mode = args.message_mode
+    loss_log_file = args.loss_log_file
+    eval_dump_file = args.eval_dump_file
+    seed = args.seed
 
     # Create the FedJob
     if train_mode.lower() == "sft":
@@ -104,15 +109,25 @@ def main():
             "path": "src.hf_peft_model.CausalLMPEFTModel",
             "args": {"model_name_or_path": model_name_or_path},
         }
+
+    # change to using HFFileModelPersistor
+    # job.to(PTFileModelPersistor(model=model_args, allow_numpy_conversion=False), "server", id="persistor")
+
     job.to(
-        PTFileModelPersistor(model=model_args, allow_numpy_conversion=False),
+        HFFileModelPersistor(
+            model=model_args,
+            allow_numpy_conversion=False,
+            global_model_file_name="global_model",  # This is the directory name
+            best_global_model_file_name="best_global_model",
+            model_name_or_path=args.model_name_or_path,  # Pass the model name or path
+        ),
         "server",
         id="persistor",
     )
 
     # Add model selection widget and send to server
     job.to(
-        IntimeModelSelector(key_metric="eval_loss", negate_key_metric=True),
+        IntimeModelSelector(key_metric="eval_accuracy", negate_key_metric=False),
         "server",
         id="model_selector",
     )
@@ -122,9 +137,25 @@ def main():
         client_id = client_ids[i]
         site_name = f"site-{client_id}"
         data_path_train = os.path.join(args.data_path, client_id, "training.jsonl")
-        data_path_valid = os.path.join(args.data_path, client_id, "validation.jsonl")
+        data_path_valid = os.path.join(args.data_path, client_id, "testing.jsonl")
 
-        script_args = f"--model_name_or_path {model_name_or_path} --data_path_train {data_path_train} --data_path_valid {data_path_valid} --output_path {output_path} --train_mode {train_mode} --message_mode {message_mode} --num_rounds {num_rounds}"
+        script_args = (
+            f"--model_name_or_path {model_name_or_path} "
+            f"--data_path_train {data_path_train} "
+            f"--data_path_valid {data_path_valid} "
+            f"--output_path {output_path} "
+            f"--train_mode {train_mode} "
+            f"--message_mode {message_mode} "
+            f"--num_rounds {num_rounds} "
+            f"--site_name {site_name}"
+        )
+        if loss_log_file:
+            script_args += f" --loss_log_file {loss_log_file}"
+        if eval_dump_file:
+            script_args += f" --eval_dump_file {eval_dump_file}"
+        if seed:
+            script_args += f" --seed {seed}"
+
         if message_mode == "tensor":
             server_expected_format = "pytorch"
         elif message_mode == "numpy":
@@ -134,20 +165,41 @@ def main():
                 f"Invalid message_mode: {message_mode}, only numpy and tensor are supported."
             )
 
+        # To customize timeouts, use BaseScriptRunner with a pre-configured executor. ScriptRunner does not accept an exector, but BaseScriptRunner does.
+        # Note: BaseScriptRunner uses fixed component ids "pipe" and "launcher", which we match here.
+        # This changes the timeouts properly, which we may need to modify depending on batch sizes, model size, etc.
+
+        from nvflare.app_opt.pt.client_api_launcher_executor import (
+            PTClientAPILauncherExecutor,
+        )
+
+        executor = PTClientAPILauncherExecutor(
+            pipe_id="pipe",
+            launcher_id="launcher",
+            peer_read_timeout=500.0,
+            task_wait_timeout=500.0,
+            launch_timeout=500.0,
+            heartbeat_timeout=500.0,
+            last_result_transfer_timeout=1000.0,
+            server_expected_format=server_expected_format,
+        )
+
         if len(gpus[i]) == 1:
-            runner = ScriptRunner(
+            runner = BaseScriptRunner(
                 script=train_script,
                 script_args=script_args,
                 server_expected_format=server_expected_format,
                 launch_external_process=True,
+                executor=executor,
             )
         else:
-            runner = ScriptRunner(
+            runner = BaseScriptRunner(
                 script=train_script,
                 script_args=script_args,
                 server_expected_format=server_expected_format,
                 launch_external_process=True,
                 command=f"python3 -m torch.distributed.run --nnodes=1 --nproc_per_node={len(gpus[i])} --master_port={ports[i]}",
+                executor=executor,
             )
         job.to(runner, site_name, tasks=["train"])
 
@@ -166,11 +218,9 @@ def main():
             )
 
         # Add additional parameters to clients
-        # TODO: this code is problematic, if i keep it i get AttributeError: 'dict' object has no attribute '__module__'. Did you mean: '__reduce__'?
-        # if i remove the code, we can run, but the client timeout is not set and i keep hitting timeout errors (no quantization)
-        # with quantization, no errors with timeout, training happens normaly
-        # client_params = {"task_result_timeout": 300}
-        # job.to_clients(client_params)
+        # TODO: can add this if using nvflare 2.7rc, but with 2.6 will fail with AttributeError: 'dict' object has no attribute '__module__'. Did you mean: '__reduce__'?
+        # client_params = {"submit_task_result_timeout": 300}
+        # job.to(client_params, site_name)
 
     # Export the job
     print("job_dir=", job_dir)
@@ -212,7 +262,7 @@ def define_parser():
     parser.add_argument(
         "--model_name_or_path",
         type=str,
-        default="meta-llama/llama-3.2-1b",
+        default="meta-llama/llama-3.1-8B-Instruct",
         help="model name or path",
     )
     parser.add_argument(
@@ -255,6 +305,21 @@ def define_parser():
         nargs="+",
         default="7777",
         help="ports for the clients, default to one client 7777",
+    )
+    parser.add_argument(
+        "--loss_log_file",
+        type=str,
+        help="Optional loss log file name to be written by each client; if relative, placed under output_path",
+    )
+    parser.add_argument(
+        "--eval_dump_file",
+        type=str,
+        help="Optional JSONL file to append full eval generations each eval (relative path placed under output_path)",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        help="random seed",
     )
     return parser.parse_args()
 
